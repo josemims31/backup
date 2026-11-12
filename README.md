@@ -21,10 +21,10 @@
 
 ### 安装和使用
 #### 直接使用构建好的绿色版软件
-下载Backup-fang523.zip，解压，双击打开根目录下的Backup.exe。
+在这里下载[Backup-fang523.zip](https://github.com/josemims31/backup/releases)，解压，双击打开根目录下的Backup.exe。
 
 #### 从源码构建
-1.下载Backup-fang523-code.zip，
+1.在这里下载[Backup-fang523-code.zip](https://github.com/josemims31/backup/archive/refs/heads/main.zip)，
 2.解压
 3.在源码根目录 `shift+右键` 选择 `在此处打开powershell`
 4.输入以下命令并回车进行构建：
