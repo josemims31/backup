@@ -18,7 +18,7 @@ namespace Backup.Updates
     {
         public string Installation,Payload,Version;public int ParentProcessId;public long ParentStartUtcTicks;public bool ExitAfterUpdate,Minimized;
     }
-    public sealed class UpdateResult {public bool Success;public string Version,Message,TimeUtc;}
+    public sealed class UpdateResult {public bool Success,Pending;public string Version,Message,TimeUtc;}
     public static class UpdateProtocol
     {
         public const string ManifestName="installation-manifest.json";
@@ -40,8 +40,14 @@ namespace Backup.Updates
         {using(var sha=SHA256.Create())using(var stream=File.OpenRead(file))return BitConverter.ToString(sha.ComputeHash(stream)).Replace("-","").ToLowerInvariant();}
         public static void AtomicText(string path,string text)
         {
-            Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path));string temporary=path+"."+Guid.NewGuid().ToString("N")+".tmp";
-            try{File.WriteAllText(temporary,text,new UTF8Encoding(false));if(File.Exists(path))File.Replace(temporary,path,null);else File.Move(temporary,path);}finally{if(File.Exists(temporary))File.Delete(temporary);}
+            NoLinks(path);Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path));string temporary=path+"."+Guid.NewGuid().ToString("N")+".tmp";
+            try
+            {
+                byte[] bytes=new UTF8Encoding(false).GetBytes(text);
+                using(var stream=new FileStream(temporary,FileMode.CreateNew,FileAccess.Write,FileShare.None)){stream.Write(bytes,0,bytes.Length);stream.Flush(true);}
+                if(File.Exists(path))File.Replace(temporary,path,null);else File.Move(temporary,path);
+            }
+            finally{if(File.Exists(temporary))File.Delete(temporary);}
         }
         public static string SafeRelativePath(string value)
         {

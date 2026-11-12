@@ -12,7 +12,7 @@ namespace Backup.Desktop
     {
         internal string CurrentVersion=Assembly.GetExecutingAssembly().GetName().Version.ToString(3);
         internal string Status="尚未发布可安装的更新";
-        internal string Notes="• 更新设置中的选项名称调整为“自动检查并安装”。";
+        internal string Notes="• 更新中断后自动恢复程序文件。\n• 新版本启动失败时自动回滚。\n• 确认新版本正常启动后清理更新缓存。";
         internal bool UpdateAvailable=false;
         internal bool Checking,Downloading,CanInstall=true;
         internal string InstallLabel="立即更新";

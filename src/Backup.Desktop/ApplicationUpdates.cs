@@ -55,9 +55,11 @@ namespace Backup.Desktop
         private void ReadUpdateResult()
         {
             string path=Path.Combine(UpdateProtocol.UpdatesDirectory(Backend.BaseDirectory),"result.json");if(!File.Exists(path))return;UpdateProtocol.NoLinks(path);if(new FileInfo(path).Length>65536)return;
-            var result=UpdateProtocol.ReadJson<UpdateResult>(File.ReadAllText(path,System.Text.Encoding.UTF8));if(result==null||result.TimeUtc==updatePreferences.LastResultUtc)return;
+            var result=UpdateTransactions.Read<UpdateResult>(path,65536);if(result==null||result.TimeUtc==updatePreferences.LastResultUtc)return;
             updatePreferences.LastResultUtc=result.TimeUtc;updatePreferences.Status=result.Message;updatePreferences.InstallRequested=false;updatePreferences.PreparedPath=null;updatePreferences.PreparedVersion=null;SaveUpdatePreferences();
         }
+        internal void ApplicationStartupConfirmed()
+        {if(disposed)return;try{ReadUpdateResult();RefreshUpdatePresentation();}catch(Exception error){Log("读取更新结果未完成："+error.Message);}}
         private void SaveUpdatePreferences(){UpdateProtocol.NoLinks(UpdateStatePath);UpdateProtocol.AtomicText(UpdateStatePath,UpdateProtocol.Json(updatePreferences));}
         private void UpdateStatus(string message)
         {updatePreferences.Status=message;try{SaveUpdatePreferences();}catch(Exception error){updatePreferences.Status=message+"；更新设置保存未完成："+error.Message;}RefreshUpdatePresentation();}
@@ -175,8 +177,7 @@ namespace Backup.Desktop
                 if(UpdateInstallFixture!=null){UpdateInstallFixture(exitAfter);return true;}
 #endif
                 string payload=updatePreferences.PreparedPath;var manifest=UpdateProtocol.ReadManifest(payload);if(UpdateProtocol.ParseVersion(manifest.Version)<=UpdateProtocol.ParseVersion(InstalledVersion))throw new InvalidDataException("更新包不是更新的版本。");
-                string session=UpdateInstaller.SessionDirectory(Backend.BaseDirectory,payload),helper=Path.Combine(session,"helper");UpdateProtocol.NoLinks(helper);Directory.CreateDirectory(helper);File.Copy(Path.Combine(Backend.BaseDirectory,"updater","Backup.Updater.exe"),Path.Combine(helper,"Backup.Updater.exe"),true);
-                File.Copy(Path.Combine(Backend.BaseDirectory,"updater","Backup.Updater.exe.config"),Path.Combine(helper,"Backup.Updater.exe.config"),true);
+                string session=UpdateInstaller.SessionDirectory(Backend.BaseDirectory,payload);UpdateTransactions.RecoveryHelper(Backend.BaseDirectory,payload);
                 using(var process=Process.GetCurrentProcess())
                 {var request=new UpdateRequest{Installation=Backend.BaseDirectory,Payload=payload,Version=manifest.Version,ParentProcessId=process.Id,ParentStartUtcTicks=process.StartTime.ToUniversalTime().Ticks,ExitAfterUpdate=exitAfter,Minimized=Window.WindowState==WindowState.Minimized};updateHelperRequest=Path.Combine(session,"request.json");UpdateProtocol.AtomicText(updateHelperRequest,UpdateProtocol.Json(request));}
                 SaveUiPreference(UpdateResumeKey,JsonSettings.Encode(new UpdateUiResume{Tab=Control<TabControl>("Tabs").SelectedIndex,Drafts=selectionDrafts.ToDictionary(pair=>pair.Key,pair=>CopySelection(pair.Value))}));
@@ -197,7 +198,7 @@ namespace Backup.Desktop
         private void LaunchPreparedUpdater()
         {
             if(!updateClosing||string.IsNullOrEmpty(updateHelperRequest))return;
-            try{string helper=Path.Combine(Path.GetDirectoryName(updateHelperRequest),"helper","Backup.Updater.exe");Process.Start(new ProcessStartInfo(helper,"\""+updateHelperRequest+"\""){UseShellExecute=false,CreateNoWindow=true,WindowStyle=ProcessWindowStyle.Hidden,WorkingDirectory=Backend.BaseDirectory});}
+            try{string helper=Path.Combine(Path.GetDirectoryName(updateHelperRequest),"recovery","Backup.Updater.exe");Process.Start(new ProcessStartInfo(helper,"\""+updateHelperRequest+"\""){UseShellExecute=false,CreateNoWindow=true,WindowStyle=ProcessWindowStyle.Hidden,WorkingDirectory=Backend.BaseDirectory});}
             catch(Exception error){try{UpdateProtocol.AtomicText(Path.Combine(UpdateProtocol.UpdatesDirectory(Backend.BaseDirectory),"result.json"),UpdateProtocol.Json(new UpdateResult{Success=false,Message="更新程序启动失败："+error.Message,Version=updatePreferences.PreparedVersion,TimeUtc=DateTime.UtcNow.ToString("o")}));}catch(Exception){}}
         }
     }
