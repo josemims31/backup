@@ -1,0 +1,19 @@
+Backup-fang523 1.0.4
+Copyright (C) 2026 fang523 and contributors
+
+Except for the third-party components identified in THIRD_PARTY_NOTICES.md,
+the original source code, build scripts, assets, and documentation in this
+project are licensed under the GNU General Public License, version 3 only
+(SPDX-License-Identifier: GPL-3.0-only).
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU General Public License as published by the Free
+Software Foundation, version 3 of the License.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+FITNESS FOR A PARTICULAR PURPOSE. See LICENSE for the full license text.
+
+Third-party components retain their original copyrights and licenses.
+Their notices and license texts are provided in licenses/ and alongside
+the corresponding dependencies under work/tools/.

@@ -1,0 +1,56 @@
+# Generated builds and project cache
+/build/
+/cache/
+/dist/
+/outputs/
+/releases/
+**/bin/
+**/obj/
+
+# Runtime data and logs
+/data/
+/logs/
+/log/
+*.log
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+catalog-*.7z*
+data-*.7z*
+node-*.7z*
+*.partial
+*.tmp
+*.bak
+
+# Editor and OS files
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.pdb
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Local credentials and private keys
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.p12
+*.ppk
+id_rsa
+id_ed25519
+
+# Keep work/ build scripts, vendored DLLs, notices, and source archives tracked.
