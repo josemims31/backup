@@ -12,7 +12,7 @@ namespace Backup.Desktop
     {
         internal string CurrentVersion=Assembly.GetExecutingAssembly().GetName().Version.ToString(3);
         internal string Status="尚未发布可安装的更新";
-        internal string Notes="• 新增“关于”，集中查看博客、GitHub 项目地址、版本和更新内容。\n\n• 增加 GitHub 自动更新，每天最多自动检查一次；更新设置可随时调整。\n\n• 更新等待当前任务完成后执行，保留原来的退出状态；替换失败会恢复原程序文件。";
+        internal string Notes="• 更新设置中的选项名称调整为“自动检查并安装”。";
         internal bool UpdateAvailable=false;
         internal bool Checking,Downloading,CanInstall=true;
         internal string InstallLabel="立即更新";
@@ -61,7 +61,7 @@ namespace Backup.Desktop
             ReleaseNotes=new TextBox{Text=display.Notes,IsReadOnly=true,IsUndoEnabled=false,AcceptsReturn=true,TextWrapping=TextWrapping.Wrap,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,HorizontalScrollBarVisibility=ScrollBarVisibility.Disabled,VerticalContentAlignment=VerticalAlignment.Top,Background=Brushes.White,Foreground=Color("#20344A"),BorderBrush=Color("#DFE5ED"),Padding=new Thickness(13,12,13,12),Margin=new Thickness(0,0,0,18)};Row(root,ReleaseNotes,4);
             var preferences=new StackPanel{Margin=new Thickness(0,0,0,20)};
             var modeLabel=Label("更新设置",14);modeLabel.FontWeight=FontWeights.SemiBold;modeLabel.Margin=new Thickness(0,0,0,9);preferences.Children.Add(modeLabel);
-            UpdateMode=new ComboBox{Width=228,MinHeight=34,HorizontalAlignment=HorizontalAlignment.Left,SelectedIndex=-1,Margin=new Thickness(0)};foreach(string choice in new[]{"自动检查","自动检查并更新","不检查更新"})UpdateMode.Items.Add(choice);UpdateMode.SelectedIndex=display.UpdateMode;preferences.Children.Add(UpdateMode);
+            UpdateMode=new ComboBox{Width=228,MinHeight=34,HorizontalAlignment=HorizontalAlignment.Left,SelectedIndex=-1,Margin=new Thickness(0)};foreach(string choice in new[]{"自动检查","自动检查并安装","不检查更新"})UpdateMode.Items.Add(choice);UpdateMode.SelectedIndex=display.UpdateMode;preferences.Children.Add(UpdateMode);
             var help=Label("每天最多自动检查一次；有任务运行时，完成后再更新。",12,Color("#6C7888"));help.Margin=new Thickness(0,9,0,0);preferences.Children.Add(help);Row(root,preferences,5);
             var footer=new StackPanel{Orientation=Orientation.Horizontal};
             CheckUpdate=ActionButton("检查更新",96);InstallUpdate=ActionButton("立即更新",96);InstallUpdate.IsEnabled=display.UpdateAvailable;

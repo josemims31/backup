@@ -140,7 +140,7 @@ namespace Backup.Desktop
         private void ChangeUpdateMode(int mode)
         {
             if(mode<0||mode>2)return;updatePreferences.Mode=mode;if(mode!=1){updatePreferences.InstallRequested=false;if(updateDownloadCancellation!=null)updateDownloadCancellation.Cancel();}
-            if(mode==1)updatePreferences.DownloadAttemptUtc=null;UpdateStatus(mode==2?"已关闭自动更新检查。":mode==0?"已设置为自动检查，有新版本时显示提示。":"已设置为自动检查并更新。");if(mode!=2)ObserveUpdateCheck();
+            if(mode==1)updatePreferences.DownloadAttemptUtc=null;UpdateStatus(mode==2?"已关闭自动更新检查。":mode==0?"已设置为自动检查，有新版本时显示提示。":"已设置为自动检查并安装。");if(mode!=2)ObserveUpdateCheck();
         }
         private async void ObserveUpdateCheck(){await CheckForUpdatesAsync(false);}
         private void DeferApplicationUpdate()
