@@ -22,13 +22,22 @@ Invoke-WithProjectCache {
     if($LASTEXITCODE -ne 0){throw 'Core build failed.'}
     Assert-BuildInputsUnchanged $coreInputs
     & (Join-Path $PSScriptRoot 'work\BuildRepositoryModules.ps1') -Compiler $compiler -Stage $stage -CoreOutput $coreOutput
-    $uiSources=@((Get-ChildItem src\Backup.Desktop -Filter '*.cs').FullName)
+    $updateSources=@((Get-ChildItem src\Backup.Updates -Filter '*.cs').FullName)
+    $updaterSources=@((Get-ChildItem src\Backup.Updater -Filter '*.cs').FullName)+$updateSources
+    $updaterStage=Join-Path $stage 'updater'
+    New-Item -ItemType Directory -Path $updaterStage -Force | Out-Null
+    $updaterInputs=Get-BuildInputHashes ($updaterSources+@($compiler,$PSCommandPath,'src\Backup.Desktop\app.manifest'))
+    & $compiler /nologo /codepage:65001 /target:winexe /platform:x64 /optimize+ /win32manifest:src\Backup.Desktop\app.manifest ("/out:"+(Join-Path $updaterStage 'Backup.Updater.exe')) /r:System.Core.dll /r:System.Runtime.Serialization.dll /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll @updaterSources
+    if($LASTEXITCODE -ne 0){throw 'Updater build failed.'}
+    Assert-BuildInputsUnchanged $updaterInputs
+    Copy-Item -LiteralPath src\Backup.Updater\Backup.Updater.exe.config -Destination $updaterStage -Force
+    $uiSources=@((Get-ChildItem src\Backup.Desktop -Filter '*.cs').FullName)+$updateSources
     $appIcon=Join-Path $PSScriptRoot 'cache\backup-icon.ico'
     $browserIcons=@((Get-ChildItem assets\browser -Filter '*.png').FullName)
     $iconResources=@($browserIcons | ForEach-Object {'/resource:'+$_+',Backup.Desktop.BrowserIcons.'+[IO.Path]::GetFileName($_)})
     $uiInputs=Get-BuildInputHashes ($uiSources+$browserIcons+@($compiler,$PSCommandPath,$coreOutput,$appIcon,'src\Backup.Desktop\MainWindow.xaml','src\Backup.Desktop\app.manifest'))
     $uiOutput=Join-Path $stage 'Backup.exe'
-    $references=@("/r:$coreOutput",'/r:System.dll','/r:Microsoft.CSharp.dll','/r:System.Security.dll','/r:System.Core.dll','/r:System.Runtime.Serialization.dll','/r:System.Xaml.dll',"/r:$wpf\WindowsBase.dll",'/r:System.Windows.Forms.dll',"/r:$wpf\PresentationFramework.dll","/r:$wpf\PresentationCore.dll","/r:$wpf\UIAutomationClient.dll","/r:$wpf\UIAutomationTypes.dll")
+    $references=@("/r:$coreOutput",'/r:System.dll','/r:Microsoft.CSharp.dll','/r:System.Security.dll','/r:System.Core.dll','/r:System.Runtime.Serialization.dll','/r:System.IO.Compression.dll','/r:System.IO.Compression.FileSystem.dll','/r:System.Xaml.dll',"/r:$wpf\WindowsBase.dll",'/r:System.Windows.Forms.dll',"/r:$wpf\PresentationFramework.dll","/r:$wpf\PresentationCore.dll","/r:$wpf\UIAutomationClient.dll","/r:$wpf\UIAutomationTypes.dll")
     & $compiler /nologo /codepage:65001 /target:winexe /platform:x64 /optimize+ /win32manifest:src\Backup.Desktop\app.manifest "/win32icon:$appIcon" "/out:$uiOutput" '/resource:src\Backup.Desktop\MainWindow.xaml,Backup.Desktop.MainWindow.xaml' ("/resource:"+$appIcon+",Backup.Desktop.AppIcon.ico") @iconResources @references @uiSources
     if($LASTEXITCODE -ne 0){throw 'UI build failed.'}
     Assert-BuildInputsUnchanged $uiInputs
@@ -41,5 +50,6 @@ Invoke-WithProjectCache {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $notice) -Destination (Join-Path $stage $notice) -Force
     }
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'licenses') -Destination (Join-Path $stage 'licenses') -Recurse -Force
+    & (Join-Path $PSScriptRoot 'work\BuildUpdateManifest.ps1') -BuildDirectory $stage
     $stage
 }

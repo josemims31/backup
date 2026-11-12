@@ -80,7 +80,7 @@ namespace Backup.Desktop
             BindCopyableMessages();UpdateManagers();string selectedTask=UiPreference(SelectedTaskPreference);CurrentTask=Workspace.Tasks.FirstOrDefault(t=>!t.Deleted&&t.Id==selectedTask)??Workspace.Tasks.FirstOrDefault(t=>!t.Deleted);LoadTaskControls();RefreshCatalog();
             Window.Loaded+=async delegate{initialFileLists=InitializeFileListsAsync();await GuardAsync(()=>initialFileLists);};
             InitializeRuntime();InitializeStatusColors();InitializeDatabaseSavedTime();InitializeRepositoryPresentation();InitializeOpenListFallback();InitializeServerTrustPrompt();operations.Changed+=OperationAdmissionChanged;UpdateRemoteTaskActions();var exitMenu=new ContextMenu();var exitItem=new MenuItem{Header="退出软件"};exitItem.Click+=delegate{RequestApplicationExit();};exitMenu.Items.Add(exitItem);Button("Settings").ContextMenu=exitMenu;
-            Log("就绪");
+            InitializeApplicationUpdates();Log("就绪");
         }
         private void Guard(Action action){try{action();}catch(Exception error){Error(error);}}
         private async Task GuardAsync(Func<Task> action){try{await action();}catch(OperationCanceledException){if(!disposed){SetOperationText("操作已取消。",OperationState.Cancelled);OperationProgress(0,false);}}catch(Exception error){if(!disposed)Error(error);}}
