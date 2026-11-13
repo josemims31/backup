@@ -152,11 +152,11 @@ namespace Backup.Core
         private IList<SourceItem> QueryCore(string root)
         {
             root = System.IO.Path.GetFullPath(root).TrimEnd('\\') + "\\";
-            if (!Everything_IsDBLoaded()) throw new IOException("Everything database is not loaded.");
+            if (!Everything_IsDBLoaded()) throw new IOException("Everything 未安装、未运行或索引尚未加载。请先安装并运行 Everything，等待索引加载完成后刷新文件列表。");
             Everything_SetSearchW("file: \"" + root + "\"");
             Everything_SetRequestFlags(FileListRequestFlags);
             Everything_SetSort(1);
-            if (!Everything_QueryW(true)) throw new IOException("Everything query failed: " + Everything_GetLastError());
+            if (!Everything_QueryW(true)) throw new IOException("Everything 查询失败（错误码：" + Everything_GetLastError() + "）。请确认已安装并运行 Everything，等待索引加载完成后刷新文件列表。");
             List<SourceItem> items = new List<SourceItem>();
             StringBuilder path = new StringBuilder(InitialPathCapacity);uint count=Everything_GetNumResults();
             Func<uint,StringBuilder,uint,uint> readPath=Everything_GetResultFullPathNameW;
@@ -166,7 +166,7 @@ namespace Backup.Core
                 if (!full.StartsWith(root, StringComparison.OrdinalIgnoreCase)) continue;
                 long size, modified;
                 if (!Everything_GetResultSize(i, out size) || !Everything_GetResultDateModified(i, out modified))
-                    throw new IOException("Required index fields are unavailable.");
+                    throw new IOException("Everything 未返回文件大小或修改时间，请等待索引加载完成后刷新文件列表。");
                 items.Add(new SourceItem { Path = full, ArchivePath = "share\\" + full.Substring(root.Length), Size = size,
                     Modified = modified });
             }
