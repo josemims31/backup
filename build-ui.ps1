@@ -5,6 +5,8 @@ Invoke-WithProjectCache {
     Set-Location -LiteralPath $PSScriptRoot
     $compiler=Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
     $wpf=Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\WPF'
+    $versionSource=Join-Path $PSScriptRoot 'src\VersionInfo.cs'
+    $versionInputs=Get-BuildInputHashes @($versionSource)
     $build=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'build')).TrimEnd('\')
     if([IO.Path]::GetDirectoryName($build) -ne $script:BackupProjectRoot -or [IO.Path]::GetFileName($build) -ne 'build'){throw 'Build directory escaped the project.'}
     foreach($path in @($PSScriptRoot,$build)){if((Test-Path -LiteralPath $path) -and ((Get-Item -LiteralPath $path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Linked build directory is not supported.'}}
@@ -23,7 +25,7 @@ Invoke-WithProjectCache {
     Assert-BuildInputsUnchanged $coreInputs
     & (Join-Path $PSScriptRoot 'work\BuildRepositoryModules.ps1') -Compiler $compiler -Stage $stage -CoreOutput $coreOutput
     $updateSources=@((Get-ChildItem src\Backup.Updates -Filter '*.cs').FullName)
-    $updaterSources=@((Get-ChildItem src\Backup.Updater -Filter '*.cs').FullName)+$updateSources
+    $updaterSources=@((Get-ChildItem src\Backup.Updater -Filter '*.cs').FullName)+$updateSources+@($versionSource)
     $updaterStage=Join-Path $stage 'updater'
     New-Item -ItemType Directory -Path $updaterStage -Force | Out-Null
     $updaterInputs=Get-BuildInputHashes ($updaterSources+@($compiler,$PSCommandPath,'src\Backup.Desktop\app.manifest'))
@@ -31,7 +33,7 @@ Invoke-WithProjectCache {
     if($LASTEXITCODE -ne 0){throw 'Updater build failed.'}
     Assert-BuildInputsUnchanged $updaterInputs
     Copy-Item -LiteralPath src\Backup.Updater\Backup.Updater.exe.config -Destination $updaterStage -Force
-    $uiSources=@((Get-ChildItem src\Backup.Desktop -Filter '*.cs').FullName)+$updateSources
+    $uiSources=@((Get-ChildItem src\Backup.Desktop -Filter '*.cs').FullName)+$updateSources+@($versionSource)
     $appIcon=Join-Path $PSScriptRoot 'cache\backup-icon.ico'
     $browserIcons=@((Get-ChildItem assets\browser -Filter '*.png').FullName)
     $iconResources=@($browserIcons | ForEach-Object {'/resource:'+$_+',Backup.Desktop.BrowserIcons.'+[IO.Path]::GetFileName($_)})
@@ -50,6 +52,7 @@ Invoke-WithProjectCache {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $notice) -Destination (Join-Path $stage $notice) -Force
     }
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'licenses') -Destination (Join-Path $stage 'licenses') -Recurse -Force
+    Assert-BuildInputsUnchanged $versionInputs
     & (Join-Path $PSScriptRoot 'work\BuildUpdateManifest.ps1') -BuildDirectory $stage
     $stage
 }

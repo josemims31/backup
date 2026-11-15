@@ -8,8 +8,8 @@ namespace Backup.Core
     public static class BackupObjectNaming
     {
         private static readonly Regex pattern = new Regex(
-            ("\\A(?<archive>(?:catalog|(?:node|data)(?:-[A-Za-z0-9]{4})?)-(?:[0-9]{8}|[0-9]{12}(?:-[1-9][0-9]*)?)\\.7z)(?<volume>\\.(?:00[1-9]|0[1-9][0-9]|[1-9][0-9]{2,}))?(?<te" +
-            "mporary>\\.upload-[0-9a-f]{32}\\.partial|\\.partial)?\\z"),
+            ("\\A(?<archive>(?:catalog|(?:node|data)(?:-[A-Za-z0-9]{4})?)-(?:[0-9]{8}|(?:[0-9]{12}|[0-9]{6}-[0-9]{4}-[0-9]{2})(?:-[1-9][0-9]*)?)\\.7z)" +
+            "(?<volume>\\.(?:00[1-9]|0[1-9][0-9]|[1-9][0-9]{2,}))?(?<temporary>\\.upload-[0-9a-f]{32}\\.partial|\\.partial)?\\z"),
             RegexOptions.CultureInvariant | RegexOptions.IgnoreCase | RegexOptions.Compiled
         );
         public static bool IsManaged(string name)

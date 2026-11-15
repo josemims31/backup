@@ -15,7 +15,7 @@ namespace Backup.Core
             if (ArchiveClock != null)
                 now = ArchiveClock();
 #endif
-            string stamp = now.ToString("yyMMddHHmmss", CultureInfo.InvariantCulture), key = "archive_number:" + stamp;
+            string stamp = now.ToString("yyMMdd-HHmm-ss", CultureInfo.InvariantCulture), key = "archive_number:" + stamp;
             string previous = GetSetting(key), suffix = previous == null ? "" : IncrementArchiveSuffix(previous);
             database.Execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", key, suffix);
             return stamp + (suffix.Length == 0 ? "" : "-" + suffix);

@@ -4,10 +4,11 @@ $moduleStage=Join-Path $Stage 'repositories'
 New-Item -ItemType Directory -Path $moduleStage -Force | Out-Null
 $remoteLibraries=@((Get-ChildItem work\tools\sshnet -Filter '*.dll').FullName)
 $shared=(Get-Item 'src\Backup.Repositories.Shared\AssemblyInfo.cs').FullName
+$versionSource=(Get-Item 'src\VersionInfo.cs').FullName
 foreach($type in @('Local','Smb','WebDav','Sftp')){
     $typeStage=Join-Path $moduleStage $type.ToLowerInvariant()
     New-Item -ItemType Directory -Path $typeStage -Force | Out-Null
-    $sources=@((Get-ChildItem ('src\Backup.Repositories.'+$type) -Filter '*.cs').FullName)+@($shared)
+    $sources=@((Get-ChildItem ('src\Backup.Repositories.'+$type) -Filter '*.cs').FullName)+@($shared,$versionSource)
     $symbols=@()
     if($type -eq 'Local' -or $type -eq 'Smb'){$sources+=@((Get-Item 'src\Backup.Repositories.FileSystem\FileSystemDestination.cs').FullName)}
     if($type -eq 'Local'){$symbols=@('/define:LOCAL_REPOSITORY')}

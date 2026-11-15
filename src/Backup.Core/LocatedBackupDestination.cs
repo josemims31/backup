@@ -97,11 +97,20 @@ namespace Backup.Core
                     var family = Regex.Match(owner, @"\A(?:data|node)-(?<tag>[A-Za-z0-9]{4})-[0-9]", RegexOptions.CultureInvariant);
                     string task = catalog.ObjectTaskOwner(owner), tag = task != null && task != "__catalog__" ? catalog.EnsureTaskTag(task) : family.Success ? family.Groups["tag"].Value : "legacy", root = (node ? "node-" : "data-") +
                         tag;
-                    // Read hints can point anywhere; replacement writes use task
-                    // buckets. An owned in-flight upload keeps its original path.
-                    bool reassign = directory != null && !Regex.IsMatch(directory, @"\A" + Regex.Escape(root) + @"/[0-9]{6}\z") && !pending;
+                    // New version packages use the task's node directory directly.
+                    // Registered legacy buckets and in-flight uploads retain their paths.
+                    bool reassign = directory != null && !(node && directory == root) &&
+                        !Regex.IsMatch(directory, @"\A" + Regex.Escape(root) + @"/[0-9]{6}\z") && !pending;
                     if (directory == null || reassign)
-                        directory = catalog.ReserveBucketDirectory(destination.Id, owner, node ? "node-buckets" : "data-buckets", tag, root, reassign);
+                    {
+                        if (node)
+                        {
+                            directory = root;
+                            catalog.RememberObjectDirectory(destination.Id, owner, directory);
+                        }
+                        else
+                            directory = catalog.ReserveBucketDirectory(destination.Id, owner, "data-buckets", tag, root, reassign);
+                    }
                 }
 
                 state.Writers++;
