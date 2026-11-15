@@ -413,7 +413,9 @@ namespace Backup.Desktop
                 throw new ArgumentException("任务仍缺少替代仓库，请先添加仓库或调整勾选目标。");
             WorkspaceMigration.ValidateTargetPolicy(task, Catalog.LoadTopology());
             var missing = TakeMissingSourceChecks(task.Id);
-            var result = BackupTask(indexed, task.RequiredCopies, ResolveBackupPassword(task), PreferredVolumeMiB, progress, task.Id, task.TargetIds, BackupRootLayout(task), allowEmpty: true);
+            var sourcePolicy = comparedFiles == null ? null : TaskSourcePolicies(task, Catalog.CaptureNode(task.Id, "", DateTime.UtcNow));
+            var result = BackupTask(indexed, task.RequiredCopies, ResolveBackupPassword(task), PreferredVolumeMiB, progress, task.Id, task.TargetIds, BackupRootLayout(task),
+                allowEmpty: true, sourcePolicy: sourcePolicy);
             if (!result.Stopped && result.Sources.Count > 0 && confirmationMonitor != null)
                 confirmationMonitor.CompletePrevious(task.Id);
             if (!result.Stopped)
@@ -453,7 +455,8 @@ namespace Backup.Desktop
             ArchiveRootLayout layout = null,
             bool forceBackup = false,
             Action<SourceItem> sourceMissing = null,
-            bool allowEmpty = false
+            bool allowEmpty = false,
+            Func<SourceItem, TaskSourcePolicy> sourcePolicy = null
         )
         {
             if (copies < 1 || volumeMiB != 50 && volumeMiB != 100 && volumeMiB != AutomaticVolumeMiB)
@@ -491,7 +494,7 @@ namespace Backup.Desktop
 
                     eligible++;
                     bool attention;
-                    if (NeedsBackup(original, forceBackup, prior, topology, target, coverage, out attention))
+                    if (NeedsBackup(original, forceBackup, prior, topology, target, coverage, sourcePolicy, out attention))
                         selected.Add(original);
                     else
                     {
@@ -504,7 +507,8 @@ namespace Backup.Desktop
                 if (eligible == 0 && !allowEmpty)
                     throw new ArgumentException("没有可备份的已勾选文件；已排除软件目录、仓库目录及匹配排除规则的文件。");
                 long batchLimit = groupIds == null ? volumeMiB * 1024L * 1024 : volumeMiB * 1024L * 1024 * 96 / 100;
-                var batches = ArchiveBatchPlanner.Create(selected, batchLimit);
+                var batches = sourcePolicy == null ? ArchiveBatchPlanner.Create(selected, batchLimit) :
+                    selected.GroupBy(source => sourcePolicy(source).Key).SelectMany(group => ArchiveBatchPlanner.Create(group.ToList(), batchLimit)).ToList();
                 int totalArchives = batches.Count;
                 long total = selected.Sum(x => x.Size), read = 0, lastTick = 0, buffered = 0, memory = MemoryLimitBytes;
                 int finished = 0, volumes = 0, copyCount = 0;
@@ -558,7 +562,8 @@ namespace Backup.Desktop
                     using (adapters.BeginScope())
                     using (var buffers = new VolumeBufferPool(memory, volumeMiB * 1024 * 1024, control, OperationMemory))
                     {
-                        var readBatches = ReadBackupBatches(batches, batchLimit, result, taskId, forceBackup, sourceMissing, sourceWorkspace, layout, prior, topology, target, coverage, difference => Interlocked.Add(ref total, difference));
+                        var readBatches = ReadBackupBatches(batches, batchLimit, result, taskId, forceBackup, sourceMissing, sourceWorkspace, layout, prior, topology, target, coverage,
+                            difference => Interlocked.Add(ref total, difference), sourcePolicy);
                         int started = 0;
                         try
                         {
@@ -589,6 +594,9 @@ namespace Backup.Desktop
                                     if (!next.MoveNext())
                                         break;
                                     var batch = next.Current;
+                                    var batchPolicy = sourcePolicy == null ? null : sourcePolicy(batch[0]);
+                                    var batchGroups = batchPolicy == null ? groupIds : batchPolicy.Groups;
+                                    int batchCopies = batchPolicy == null ? copies : batchGroups.Count;
                                     control.Checkpoint();
                                     if (StopRequested)
                                     {
@@ -680,13 +688,13 @@ namespace Backup.Desktop
                                     };
                                     if (groupIds == null)
                                     {
-                                        var archive = engine.BackupForTask(batch, copies, password, volumeMiB * 1024 * 1024, method, null, null, transfer, taskId, groupIds);
+                                        var archive = engine.BackupForTask(batch, batchCopies, password, volumeMiB * 1024 * 1024, method, null, null, transfer, taskId, batchGroups);
                                         result.Archives.Add(archive);
                                         Interlocked.Increment(ref finished);
                                     }
                                     else
                                     {
-                                        var prepared = engine.PrepareForTask(batch, copies, password, volumeMiB * 1024 * 1024, method, transfer, taskId, groupIds, control, buffers, scheduler);
+                                        var prepared = engine.PrepareForTask(batch, batchCopies, password, volumeMiB * 1024 * 1024, method, transfer, taskId, batchGroups, control, buffers, scheduler);
                                         pending.Add(CompletePreparedAsync(
                                             prepared,
                                             completed =>

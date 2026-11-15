@@ -27,6 +27,8 @@ namespace Backup.Core
         public BackupControl Control;
         public bool VerifyContentDuringRead = true;
         public Action<long> ReadObserver;
+        // Used when the same file is packed for an additional task target.
+        public IList<NodeFile> PriorBackupCopies;
         internal byte[] MemoryContent;
         internal Func<Stream> MemoryStreamFactory;
         public bool IsMemory

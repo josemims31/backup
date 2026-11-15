@@ -246,9 +246,9 @@ namespace Backup.Desktop
                             var state = new RepackNode
                             {
                                 Node = node,
-                                References = new HashSet<long>(db.Files.Select(f => f.ArchiveId))
+                                References = new HashSet<long>(db.ArchiveIds)
                             };
-                            foreach (var file in db.Files)
+                            foreach (var file in db.FileCopies)
                             {
                                 ArchiveSummary archive;
                                 if (!archives.TryGetValue(file.ArchiveId, out archive) || archive.TaskId != node.TaskId || archive.Status == "cleaned")
@@ -466,7 +466,7 @@ namespace Backup.Desktop
                 {
                     var db = ReadNodeDatabase(state.Node);
                     bool rewritten = false;
-                    foreach (var file in db.Files)
+                    foreach (var file in db.FileCopies)
                     {
                         RepackedFile target;
                         if (!replacements.TryGetValue(RepackFileKey(file), out target))
@@ -509,9 +509,9 @@ namespace Backup.Desktop
                             ArchiveId = uploaded.Archive.ArchiveId,
                             EntryPath = item.Item4.StoredPath
                         };
-                        Catalog.PublishNode(node, db.Files.Select(f => f.ArchiveId));
+                        Catalog.PublishNode(node, db.ArchiveIds);
                         item.Item1.Node = node;
-                        item.Item1.References = new HashSet<long>(db.Files.Select(f => f.ArchiveId));
+                        item.Item1.References = new HashSet<long>(db.ArchiveIds);
                         touched.Add(old.ArchiveId);
                         result.Versions++;
                         CacheNode(node, item.Item3);

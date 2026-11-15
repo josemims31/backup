@@ -120,7 +120,7 @@ namespace Backup.Desktop
         // legacy string hash stops at NUL and makes large same-task histories quadratic.
         private static string FileKey(FileHistoryRow row)
         {
-            return row.ArchiveId.ToString(System.Globalization.CultureInfo.InvariantCulture) + ":" + row.Path.ToUpperInvariant();
+            return (row.ReplicaOf > 0 ? row.ReplicaOf : row.ArchiveId).ToString(System.Globalization.CultureInfo.InvariantCulture) + ":" + row.Path.ToUpperInvariant();
         }
 
         public static List<BackupHistoryNode> BuildFolders(

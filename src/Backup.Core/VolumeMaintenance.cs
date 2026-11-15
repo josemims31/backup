@@ -147,6 +147,8 @@ namespace Backup.Core
                 }
 
                 database.Execute("UPDATE archives SET target_copies=?,status='complete' WHERE id=?", plan.Pools.Count, plan.ArchiveId);
+                if (Scalar("SELECT count(*) FROM archive_files WHERE archive_id=? AND state='supplementing'", plan.ArchiveId) > 0)
+                    ExpireOlderVersions(plan.ArchiveId);
                 return 0;
             });
         }
@@ -246,7 +248,7 @@ namespace Backup.Core
         {
             Transaction(delegate
             {
-                database.Execute(("UPDATE archive_files SET state='interrupted' WHERE state<>'staged' AND archive_id IN(SELECT id FROM archives WHERE " +
+                database.Execute(("UPDATE archive_files SET state='interrupted' WHERE state NOT IN ('staged','supplementing') AND archive_id IN(SELECT id FROM archives WHERE " +
                     "status='writing' AND id IN(SELECT archive_id FROM archive_pools))"));
                 database.Execute("UPDATE archives SET status='failed' WHERE status='writing' AND id IN(SELECT archive_id FROM archive_pools)");
                 database.Execute("UPDATE placements SET status='failed' WHERE archive_id IN(SELECT id FROM archives WHERE status='failed') AND reserved=0 AND status='writing'");

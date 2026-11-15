@@ -68,7 +68,7 @@ namespace Backup.Desktop
             long stamp = Backend.Catalog.DataChangeStamp;
             if (historySummaryCounts == null || stamp != historySummaryStamp)
             {
-                historySummaryCounts = Backend.Catalog.GetRecordedIntegritySummary(historySummaryScope, ObservedRecoveryObjects(Backend.Catalog, Backend.LastIntegrityReview));
+                historySummaryCounts = Backend.Catalog.GetRecordedIntegritySummary(historySummaryScope, ObservedRecoveryObjects(Backend.Catalog, Backend.LastIntegrityReview), Backend.CanRebuildFileArchiveFromPeers);
                 historySummaryStamp = stamp;
             }
 

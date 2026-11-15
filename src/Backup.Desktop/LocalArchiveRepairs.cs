@@ -101,10 +101,12 @@ namespace Backup.Desktop
                                 if (nodeRevision != null && error is IOException && RebuildNodePackageFromCache(nodeRevision, task, report,
                                     latestTargets.ContainsKey(item.ArchiveId) ? latestTargets[item.ArchiveId] : OriginalRepackPolicy(Catalog.GetArchive(item.ArchiveId)).Roots))
                                     continue;
-                                if (nodeRevision == null && !sourceAttempted && error is IOException)
+                                if (nodeRevision == null && error is IOException && (!sourceAttempted || error is NoReadableReplicaException))
                                     try
                                     {
-                                        if (RebuildUnfinishedArchiveFromSources(item.ArchiveId, task, report))
+                                        if (error is NoReadableReplicaException && RebuildFileReplicaArchive(item.ArchiveId, task, report))
+                                            continue;
+                                        if (!sourceAttempted && RebuildUnfinishedArchiveFromSources(item.ArchiveId, task, report))
                                             continue;
                                     }
                                     catch (Exception sourceError)

@@ -55,7 +55,10 @@ namespace Backup.Core
             string digest = NodeFileDatabase.Hash(bytes);
             Transaction(delegate
             {
-                if (files.Files.Select(file => file.ArchiveId).Distinct().Any(id => new[] { "writing", "failed", "damaged", "cleaned" }.Contains(GetArchive(id).Status)))
+                var statuses = files.ArchiveIds.ToDictionary(id => id, id => GetArchive(id).Status);
+                if (statuses.Values.Any(status => status == "writing" || status == "cleaned") ||
+                    statuses.Values.Any(status => status == "failed" || status == "damaged") &&
+                    files.Files.Any(file => file.Copies.All(copy => statuses[copy.ArchiveId] == "failed" || statuses[copy.ArchiveId] == "damaged")))
                     throw new IOException("未完成的压缩包不能写入备份版本引用。");
                 database.Execute(
                     "INSERT OR REPLACE INTO local_backup_nodes(task_id,id,created_utc,revision,digest,bytes,source_archive,payload) VALUES(?,?,?,?,?,?,?,?)",
@@ -69,7 +72,7 @@ namespace Backup.Core
                     sourceArchive,
                     bytes
                 );
-                database.ExecuteMany("INSERT OR IGNORE INTO node_archive_seals VALUES(?)", files.Files.Select(f => f.ArchiveId).Distinct().Select(id => new object[] { id }));
+                database.ExecuteMany("INSERT OR IGNORE INTO node_archive_seals VALUES(?)", files.ArchiveIds.Select(id => new object[] { id }));
                 ClearNodeGarbageReview();
                 RepositoryStatusChanged(CatalogChange.Archives, taskId);
                 return 0;
@@ -195,7 +198,7 @@ namespace Backup.Core
                     Revision = prior.Count == 0 ? 1 : checked((long)prior[0][1] + 1)
                 };
                 var existing = GetLocalBackupNodes(taskId).SingleOrDefault();
-                var retained = existing == null ? new HashSet<long>() : new HashSet<long>(ReadLocalBackupNode(existing.Id).Files.Select(file => file.ArchiveId));
+                var retained = existing == null ? new HashSet<long>() : new HashSet<long>(ReadLocalBackupNode(existing.Id).ArchiveIds);
                 var candidates = database.Query(
                     ("SELECT f.archive_id,f.path,f.size,f.modified,f.source_path,f.entry_path,f.content_path FROM archive_files f JOIN archives a ON a.id=f.archive_id WHERE " +
                     "a.task_id=? AND a.status IN ('complete','redundancy-shortfall','repair-required') AND f.state='current' ORDER BY f.archive_id DESC,f.path"),
@@ -213,6 +216,7 @@ namespace Backup.Core
                     .ToList();
                 var eligible = new HashSet<long>(candidates.Select(file => file.ArchiveId).Distinct().Where(id => retained.Contains(id) || published > 0 && IsNodeArchive(id) || HasReadableInspectedManifest(id)));
                 files.Files.AddRange(candidates.Where(file => eligible.Contains(file.ArchiveId)).GroupBy(file => file.Path, StringComparer.OrdinalIgnoreCase).Select(group => group.First()).OrderBy(file => file.Path, StringComparer.OrdinalIgnoreCase));
+                AttachWorkingReplicas(files, taskId);
                 if (files.Files.Count > 0)
                     SaveLocalBackupNode(taskId, files, latest);
             }
@@ -226,10 +230,24 @@ namespace Backup.Core
             if (node == null)
                 return;
             var files = ReadLocalBackupNode(node.Id);
-            var invalid = new HashSet<long>(files.Files.Select(file => file.ArchiveId).Distinct().Where(id => new[] { "writing", "failed", "damaged", "cleaned" }.Contains(GetArchive(id).Status)));
+            var invalid = new HashSet<long>(files.ArchiveIds.Where(id => new[] { "writing", "failed", "damaged", "cleaned" }.Contains(GetArchive(id).Status)));
             if (invalid.Count == 0)
                 return;
-            files.Files.RemoveAll(file => invalid.Contains(file.ArchiveId));
+            foreach (var file in files.Files.Where(file => invalid.Contains(file.ArchiveId)).ToList())
+            {
+                var copies = file.Copies.Where(copy => !invalid.Contains(copy.ArchiveId)).ToList();
+                if (copies.Count == 0)
+                {
+                    files.Files.Remove(file);
+                    continue;
+                }
+                file.ArchiveId = copies[0].ArchiveId;
+                file.EntryPath = copies[0].EntryPath;
+                file.ContentPath = copies[0].ContentPath;
+                file.Replicas = copies.Skip(1).ToList();
+            }
+            foreach (var file in files.Files.Where(file => file.Replicas != null))
+                file.Replicas.RemoveAll(replica => invalid.Contains(replica.ArchiveId));
             files.Revision = checked(files.Revision + 1);
             byte[] bytes = files.Files.Count == 0 ? null : files.Serialize();
             Transaction(delegate
@@ -284,7 +302,7 @@ namespace Backup.Core
             {
                 var result = new HashSet<long>();
                 foreach (var node in GetLocalBackupNodes())
-                    foreach (long id in ReadLocalBackupNode(node.Id).Files.Select(f => f.ArchiveId).Distinct())
+                    foreach (long id in ReadLocalBackupNode(node.Id).ArchiveIds)
                     {
                         var archive = GetArchive(id);
                         if (archive.TaskId != node.TaskId || archive.Status == "cleaned")

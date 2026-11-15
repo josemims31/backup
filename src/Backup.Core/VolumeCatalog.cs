@@ -98,9 +98,18 @@ namespace Backup.Core
                 if (topology.PolicyRoots == null)
                     topology.PolicyRoots = topology.Groups.Select(group => group.Id).ToList();
                 var usage = GetUsage();
-                var plan = GroupAllocator.Plan(topology, usage, Math.Min(budget, volumeSize), copies, canWrite);
+                var existing = sources.Any(source => source.PriorBackupCopies != null) ? ExistingReplicaDestinations(sources) : null;
+                var plan = GroupAllocator.Plan(topology, usage, Math.Min(budget, volumeSize), copies,
+                    existing == null ? canWrite : destination => !existing.Contains(destination.Id) && (canWrite == null || canWrite(destination)));
                 if (!plan.StructurallyComplete || plan.Pools == null || plan.Pools.Count == 0 || plan.Placements.Count == 0)
                     throw new IOException("所选仓库不能接收一个分卷，请检查容量、状态和组合成员。");
+                if (existing != null)
+                    foreach (var pool in plan.Pools)
+                    {
+                        pool.DestinationIds.RemoveAll(existing.Contains);
+                        if (pool.DestinationIds.Count == 0)
+                            throw new IOException("新增备份目标与原仓库重叠，没有可单独接收补传的仓库。");
+                    }
                 var stats = usage.ToDictionary(value => value.DestinationId);
                 var destinations = topology.Destinations.ToDictionary(value => value.Id);
                 foreach (var pool in plan.Pools)
@@ -140,6 +149,7 @@ namespace Backup.Core
                 })
                 );
                 SavePools(plan.ArchiveId, plan.Pools);
+                SaveSupplementalFileBasis(plan.ArchiveId, sources);
                 StageCompactionArchive(plan.ArchiveId, taskId);
                 return plan;
             });
@@ -349,7 +359,7 @@ namespace Backup.Core
                     );
                 if (!success)
                 {
-                    database.Execute("UPDATE archive_files SET state='interrupted' WHERE archive_id=? AND state<>'staged'", archive.ArchiveId);
+                    database.Execute("UPDATE archive_files SET state='interrupted' WHERE archive_id=? AND state NOT IN ('staged','supplementing')", archive.ArchiveId);
                     database.Execute("INSERT OR IGNORE INTO archive_holds(archive_id,reason) VALUES(?,'interrupted-awaiting-inspection')", archive.ArchiveId);
                     if (exhausted)
                         ForgetFailedNewArchiveUnsafe(archive.ArchiveId, archive.TaskId);

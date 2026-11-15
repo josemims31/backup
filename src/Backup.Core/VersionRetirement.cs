@@ -7,7 +7,7 @@ namespace Backup.Core
     public sealed partial class BackupCatalog
     {
         private const string HoldRetiringSql = ("INSERT OR IGNORE INTO archive_holds(archive_id,reason) SELECT DISTINCT a.id,? FROM archives a JOIN archive_files f ON f.archive_id=a.id WHERE a.task_id=? AND " +
-            "f.state='current' AND (? IS NULL OR f.path=?) AND (? IS NULL OR a.id<? AND f.path IN(SELECT path FROM archive_files WHERE archive_id=?))");
+            "f.state='current' AND (? IS NULL OR f.path=?) AND (? IS NULL OR a.id<? AND f.path IN(SELECT path FROM archive_files WHERE archive_id=? AND state<>'supplementing'))");
         private void HoldRetiringVersions(string taskId, string path = null, long? replacement = null)
         {
             string reason = "version-retire:" + taskId;

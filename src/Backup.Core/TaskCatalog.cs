@@ -7,6 +7,8 @@ namespace Backup.Core
     public sealed class FileHistoryRow
     {
         public long ArchiveId, Size, Modified;
+        public long ReplicaOf;
+        public IList<FileHistoryRow> AlternativeCopies;
         public string TaskId, Path, SourcePath, EntryPath, ContentPath, ArchiveName, FileState, ArchiveStatus, GroupId, DestinationId, PlacementStatus;
         public string StoredEntryPath
         {
@@ -31,13 +33,16 @@ namespace Backup.Core
 
         private void ExpireOlderVersions(long id)
         {
-            string taskId = GetArchive(id).TaskId;
+            var archive = GetArchive(id);
+            string taskId = archive.TaskId;
             if (taskId == "__catalog__" || IsCompactionArchive(id))
                 return;
+            if (archive.Status == "complete")
+                ActivateSupplementalFiles(id);
             HoldRetiringVersions(taskId, null, id);
             database.Execute(
                 ("UPDATE archive_files SET state='expired' WHERE archive_id<? AND archive_id IN (SELECT id FROM archives WHERE task_id=(SELECT task_id FROM archives WHERE id=?)) " +
-                "AND path IN (SELECT path FROM archive_files WHERE archive_id=?) AND state='current'"),
+                "AND path IN (SELECT path FROM archive_files WHERE archive_id=? AND state<>'supplementing') AND state='current'"),
                 id,
                 id,
                 id
@@ -59,7 +64,7 @@ namespace Backup.Core
                 if (protectUntilSnapshot)
                     HoldRetiringPaths(taskId, removed);
                 database.ExecuteMany(
-                    "UPDATE archive_files SET state='deleted' WHERE path=? AND archive_id IN (SELECT id FROM archives WHERE task_id=?) AND state='current'",
+                    "UPDATE archive_files SET state=CASE WHEN state='supplementing' THEN 'expired' ELSE 'deleted' END WHERE path=? AND archive_id IN (SELECT id FROM archives WHERE task_id=?) AND state IN ('current','supplementing')",
                     removed.Select(path => new object[] {
                     path,
                     taskId
@@ -252,7 +257,7 @@ namespace Backup.Core
             lock (gate)
             {
                 var result = new List<FileBackupView>();
-                foreach (var batch in files.Files.GroupBy(file => file.ArchiveId))
+                foreach (var batch in files.FileCopies.GroupBy(file => file.ArchiveId))
                 {
                     var archive = GetArchive(batch.Key);
                     if (archive.TaskId != taskId)
@@ -288,7 +293,7 @@ namespace Backup.Core
                         });
                 }
 
-                return result.AsReadOnly();
+                return MergeFileReplicaViews(result).AsReadOnly();
             }
         }
 
@@ -350,6 +355,7 @@ namespace Backup.Core
                         view.ValidCopies = counts[1];
                 }
 
+                MergeWorkingReplicaViews(taskId, result);
                 var views = result.AsReadOnly();
                 latestViews[taskId] = new LatestViewsCache
                 {

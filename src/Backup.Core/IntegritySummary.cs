@@ -37,10 +37,17 @@ namespace Backup.Core
 
         public BackupIntegritySummary GetRecordedIntegritySummary(ISet<string> taskIds = null, ISet<string> observedObjects = null)
         {
+            return GetRecordedIntegritySummary(taskIds, observedObjects, null);
+        }
+
+        public BackupIntegritySummary GetRecordedIntegritySummary(ISet<string> taskIds, ISet<string> observedObjects, Func<long, bool> canRebuildFromPeers)
+        {
             lock (gate)
             {
                 var result = new BackupIntegritySummary();
                 var localRepair = LocalRepairArchives(observedObjects);
+                if (canRebuildFromPeers != null)
+                    localRepair.ExceptWith(localRepair.Where(id => canRebuildFromPeers(id)).ToArray());
                 var abnormalUploads = new HashSet<long>(database.Query("SELECT DISTINCT o.archive_id FROM volume_transfers t JOIN objects o ON o.name=t.name WHERE t.state LIKE 'damaged-%' OR t.state LIKE 'checked-%'")
                     .Select(row => (long)row[0]));
                 // Retained historical versions use expired working-file rows too.

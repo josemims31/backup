@@ -11,23 +11,43 @@ namespace Backup.Desktop
         {
             internal string Key;
             internal ISet<long> Archives;
+            internal IList<long[]> FileArchives;
         }
 
         private readonly Dictionary<string, TaskPolicyReferences> taskPolicyReferences = new Dictionary<string, TaskPolicyReferences>();
-        private ISet<long> NodePolicyArchives(BackupNode node, NodeFileDatabase files = null)
+        private TaskPolicyReferences NodePolicyReferences(BackupNode node, NodeFileDatabase files = null)
         {
             string key = HistoricalNodeKey(node);
             TaskPolicyReferences cached;
             lock (taskPolicyReferences)
                 if (taskPolicyReferences.TryGetValue(node.TaskId, out cached) && cached.Key == key)
-                    return cached.Archives;
+                    return cached;
             files = files ?? ReadCachedNodeDatabase(node);
             if (files == null)
                 return null;
-            var ids = new HashSet<long>(files.Files.Select(file => file.ArchiveId).Concat(new[] { node.ArchiveId }));
+            // Unchanged files in the same packages share a policy calculation.
+            var primaryOnly = new HashSet<long>();
+            var combinations = new Dictionary<string, long[]>(StringComparer.Ordinal);
+            foreach (var file in files.Files)
+            {
+                if (file.Replicas == null || file.Replicas.Count == 0)
+                {
+                    primaryOnly.Add(file.ArchiveId);
+                    continue;
+                }
+                var ids = new[] { file.ArchiveId }.Concat(file.Replicas.Select(copy => copy.ArchiveId).OrderBy(id => id)).ToArray();
+                combinations[string.Join(",", ids)] = ids;
+            }
+            var fileArchives = primaryOnly.Select(id => new[] { id }).Concat(combinations.Values).ToList();
+            var references = new TaskPolicyReferences
+            {
+                Key = key,
+                Archives = new HashSet<long>(fileArchives.SelectMany(ids => ids).Concat(new[] { node.ArchiveId })),
+                FileArchives = fileArchives
+            };
             lock (taskPolicyReferences)
-                taskPolicyReferences[node.TaskId] = new TaskPolicyReferences { Key = key, Archives = ids };
-            return ids;
+                taskPolicyReferences[node.TaskId] = references;
+            return references;
         }
 
         private bool TaskTargetsRecorded(BackupTaskDefinition task, BackupNode latest, NodeFileDatabase files)
@@ -35,11 +55,10 @@ namespace Backup.Desktop
             if (latest == null || files == null || task.TargetIds.Count == 0 || task.PendingTargetReplacement)
                 return false;
             var recorded = Catalog.RecordedArchivePolicyRoots(task.Id);
-            return NodePolicyArchives(latest, files).All(id =>
-            {
-                ISet<string> roots;
-                return recorded.TryGetValue(id, out roots) && roots.IsSupersetOf(task.TargetIds);
-            });
+            var references = NodePolicyReferences(latest, files);
+            ISet<string> roots;
+            return recorded.TryGetValue(latest.ArchiveId, out roots) && roots.IsSupersetOf(task.TargetIds) &&
+                references.FileArchives.All(ids => RecordedFileRoots(ids, recorded).IsSupersetOf(task.TargetIds));
         }
 
         private bool ArchiveTargetsRecorded(long archiveId, IEnumerable<string> roots)
@@ -55,6 +74,7 @@ namespace Backup.Desktop
         private Dictionary<long, List<string>> LatestArchiveTargets(WorkspaceDefinition workspace, ISet<string> taskIds = null)
         {
             var result = new Dictionary<long, List<string>>();
+            var recorded = Catalog.RecordedArchivePolicyRoots();
             foreach (var task in workspace.Tasks.Where(task => !task.Deleted && !task.PendingTargetReplacement && task.TargetIds.Count > 0 &&
                 (taskIds == null || taskIds.Contains(task.Id))))
             {
@@ -63,14 +83,26 @@ namespace Backup.Desktop
                     continue;
                 // Checking targets must not download data or fetch a missing node
                 // independently of the existing version-reference recovery step.
-                var ids = NodePolicyArchives(latest) ?? new HashSet<long> { latest.ArchiveId };
+                var references = NodePolicyReferences(latest);
+                var ids = references == null ? new HashSet<long> { latest.ArchiveId } : references.Archives;
                 foreach (long id in ids)
                 {
                     List<string> roots;
                     if (!result.TryGetValue(id, out roots))
                         result[id] = roots = new List<string>();
-                    roots.AddRange(task.TargetIds.Where(root => !roots.Contains(root)));
+                    ISet<string> own;
+                    if (recorded.TryGetValue(id, out own))
+                        roots.AddRange(own.Where(root => !roots.Contains(root)));
                 }
+                var metadata = result[latest.ArchiveId];
+                metadata.AddRange(task.TargetIds.Where(root => !metadata.Contains(root)));
+                if (references != null)
+                    foreach (var fileArchives in references.FileArchives)
+                    {
+                        var missing = task.TargetIds.Except(RecordedFileRoots(fileArchives, recorded), StringComparer.Ordinal);
+                        var roots = result[fileArchives[0]];
+                        roots.AddRange(missing.Where(root => !roots.Contains(root)));
+                    }
             }
             return result;
         }

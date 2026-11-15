@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -13,10 +14,14 @@ namespace Backup.Core
         {
             using (var db = new SqliteDatabase(":memory:"))
             {
-                db.Execute("PRAGMA user_version=2");
+                bool replicas = node.Files.Any(file => file.Replicas != null && file.Replicas.Count > 0);
+                // Older readers must fail closed instead of dropping extra references.
+                db.Execute(replicas ? "PRAGMA user_version=3" : "PRAGMA user_version=2");
                 db.Execute("CREATE TABLE node(id TEXT PRIMARY KEY,created_utc TEXT NOT NULL,revision INTEGER NOT NULL)");
                 db.Execute(("CREATE TABLE files(path TEXT PRIMARY KEY,archive_id INTEGER NOT NULL,size INTEGER NOT NULL,modified INTEGER NOT NULL,source_path TEXT NOT NULL,entry_path TEXT " +
                     "NOT NULL,content_path TEXT NOT NULL DEFAULT '')"));
+                if (replicas)
+                    db.Execute("CREATE TABLE replicas(path TEXT NOT NULL REFERENCES files(path),archive_id INTEGER NOT NULL,entry_path TEXT NOT NULL,content_path TEXT NOT NULL,PRIMARY KEY(path,archive_id))");
                 db.Transaction(delegate
                 {
                     db.Execute("INSERT INTO node VALUES(?,?,?)", node.Id, node.CreatedUtc.ToUniversalTime().ToString("o"), node.Revision);
@@ -30,6 +35,10 @@ namespace Backup.Core
                         f.ContentPath ??
                         ""
                     }));
+                    if (replicas)
+                        db.ExecuteMany("INSERT INTO replicas VALUES(?,?,?,?)", node.Files.Where(file => file.Replicas != null).SelectMany(file => file.Replicas.Select(replica => new object[] {
+                            file.Path, replica.ArchiveId, replica.EntryPath ?? "", replica.ContentPath ?? ""
+                        })));
                     return 0;
                 });
                 return db.SnapshotBytes();
@@ -53,7 +62,7 @@ namespace Backup.Core
         private static NodeFileDatabase ReadDatabase(SqliteDatabase db, string expectedId)
         {
             long version = (long)db.Query("PRAGMA user_version")[0][0];
-            if (version != 1 && version != 2)
+            if (version < 1 || version > 3)
                 throw new IOException("备份版本数据库版本不支持。");
             var check = db.Query("PRAGMA quick_check");
             if (check.Count != 1 || (string)check[0][0] != "ok")
@@ -96,6 +105,21 @@ namespace Backup.Core
 
             if (node.Files.Select(f => f.Path).Distinct(StringComparer.OrdinalIgnoreCase).Count() != node.Files.Count)
                 throw new IOException("备份版本中有重复文件。");
+            if (version == 3)
+            {
+                var files = node.Files.ToDictionary(file => file.Path, StringComparer.Ordinal);
+                foreach (var row in db.StreamQuery("SELECT path,archive_id,entry_path,content_path FROM replicas ORDER BY path,archive_id"))
+                {
+                    NodeFile file;
+                    if (!(row[0] is string) || !files.TryGetValue((string)row[0], out file) || !(row[1] is long) || (long)row[1] <= 0 ||
+                        (long)row[1] == file.ArchiveId || !(row[2] is string) || !(row[3] is string))
+                        throw new IOException("备份版本副本记录无效。");
+                    if (file.Replicas == null)
+                        file.Replicas = new List<NodeFile>();
+                    file.Replicas.Add(new NodeFile { Path = file.Path, ArchiveId = (long)row[1], Size = file.Size, Modified = file.Modified,
+                        SourcePath = file.SourcePath, EntryPath = (string)row[2], ContentPath = (string)row[3] });
+                }
+            }
             return node;
         }
     }

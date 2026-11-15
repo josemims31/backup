@@ -35,7 +35,7 @@ namespace Backup.Core
             {
                 var map = ImportedNodeMap(node.Id, node.Digest);
                 if (map != null)
-                    foreach (var file in files.Files)
+                    foreach (var file in files.FileCopies)
                     {
                         long id;
                         if (!map.TryGetValue(file.ArchiveId, out id))
@@ -223,7 +223,7 @@ namespace Backup.Core
                         if (bytes != null)
                         {
                             var files = NodeFileDatabase.Read(bytes, (string)row[1], (string)row[4]);
-                            foreach (var file in files.Files)
+                            foreach (var file in files.FileCopies)
                             {
                                 long id;
                                 if (!archives.TryGetValue(file.ArchiveId, out id))

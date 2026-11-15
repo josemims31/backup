@@ -267,7 +267,8 @@ namespace Backup.Desktop
             IDictionary<string, FileBackupView> prior,
             StorageTopology topology,
             int target,
-            IDictionary<long, bool> coverage
+            IDictionary<long, bool> coverage,
+            Func<SourceItem, TaskSourcePolicy> sourcePolicy
         )
         {
             var control = ActiveBackup;
@@ -315,7 +316,7 @@ namespace Backup.Desktop
             item.VerifyContentDuringRead = false;
             result.ObservedSources.Add(item);
             bool attention;
-            if (NeedsBackup(item, forceBackup, prior, topology, target, coverage, out attention))
+            if (NeedsBackup(item, forceBackup, prior, topology, target, coverage, sourcePolicy, out attention))
                 return item;
             result.SkippedUnchanged++;
             if (attention)
@@ -336,20 +337,30 @@ namespace Backup.Desktop
             StorageTopology topology,
             int target,
             IDictionary<long, bool> coverage,
-            Action<long> adjustTotal
+            Action<long> adjustTotal,
+            Func<SourceItem, TaskSourcePolicy> sourcePolicy
         )
         {
             var current = new List<SourceItem>();
             long bytes = 0;
+            string currentPolicy = null;
             foreach (var group in planned)
                 foreach (var original in group)
                 {
-                    var item = ReadBackupSource(original, result, taskId, forceBackup, sourceMissing, workspace, layout, prior, topology, target, coverage);
+                    var item = ReadBackupSource(original, result, taskId, forceBackup, sourceMissing, workspace, layout, prior, topology, target, coverage, sourcePolicy);
                     if (result.Stopped)
                         yield break;
                     adjustTotal((item == null ? 0 : item.Size) - original.Size);
                     if (item == null)
                         continue;
+                    string key = sourcePolicy == null ? "" : sourcePolicy(item).Key;
+                    if (current.Count > 0 && key != currentPolicy)
+                    {
+                        yield return current;
+                        current = new List<SourceItem>();
+                        bytes = 0;
+                    }
+                    currentPolicy = key;
                     if (item.Size > limit)
                     {
                         yield return new[]

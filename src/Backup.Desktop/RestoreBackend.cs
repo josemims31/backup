@@ -13,6 +13,7 @@ namespace Backup.Desktop
         public string RelativePath;
         public string RequiredDestinationId;
         public string RequiredGroupId;
+        internal ISet<long> ExcludedArchives;
     }
 
     public sealed class RestoredFile
@@ -153,13 +154,16 @@ namespace Backup.Desktop
             foreach (var request in requests)
             {
                 var item = request;
+                Func<FileHistoryRow, CancellationToken, Stream> open = (file, token) => new ProducerReadStream(file.Size, (output, cancel) => ExtractSelection(
+                    new[] { WithRestoreCopy(item, file) }, null, output, selection.Cache, cancel, report, routing, selection.RepairWarnings.Enqueue, restoreSearch: search), token);
+                var copies = RestoreCopies(item);
+                if (copies.Count == 0)
+                    throw new IOException("所选仓库没有此文件的登记副本。");
                 selection.Entries.Add(new RestoredFile {
                     RelativePath = item.RelativePath,
                     Size = item.File.Size,
                     Modified = item.File.Modified,
-                    Open = token => new ProducerReadStream(item.File.Size, (output, cancel) => ExtractSelection(new[] {
-                    item
-                }, null, output, selection.Cache, cancel, report, routing, selection.RepairWarnings.Enqueue, restoreSearch: search), token)
+                    Open = token => copies.Count > 1 ? (Stream)new ReplicaReadStream(copies, file => open(file, token), token) : open(copies[0], token)
                 });
             }
 
@@ -329,6 +333,26 @@ namespace Backup.Desktop
                                         File.SetLastWriteTimeUtc(targets[request.File.StoredEntryPath], DateTime.FromFileTimeUtc(request.File.Modified));
                                 }
                             }
+                        }
+                        catch (Exception error)
+                        {
+                            if (!(error is IOException) && !(error is UnauthorizedAccessException))
+                                throw;
+                            if (singleOutput != null)
+                                throw;
+                            transfer.Cancel();
+                            var alternatives = new List<RestoreRequest>();
+                            foreach (var request in archive)
+                            {
+                                var excluded = request.ExcludedArchives == null ? new HashSet<long>() : new HashSet<long>(request.ExcludedArchives);
+                                excluded.Add(archive.Key);
+                                var next = WithRestoreCopy(request, request.File, excluded);
+                                var copy = RestoreCopies(next).FirstOrDefault(file => allowedDestinations == null || Catalog.GetCopies(file.ArchiveId).Any(stored => allowedDestinations.Contains(stored.DestinationId)));
+                                if (copy == null)
+                                    throw;
+                                alternatives.Add(WithRestoreCopy(next, copy, excluded));
+                            }
+                            ExtractSelection(alternatives, destination, null, cache, cancellation, report, routing, warning, findMoved, allowedDestinations, restoreSearch);
                         }
                         finally
                         {

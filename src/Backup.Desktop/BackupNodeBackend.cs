@@ -121,6 +121,13 @@ namespace Backup.Desktop
                 browseNodeSnapshots.Clear();
             lock (taskPolicyReferences)
                 taskPolicyReferences.Clear();
+            lock (fileReplicaPeerGate)
+            {
+                inspectedFileReplicaPeers.Clear();
+                fileReplicaPeerIdentity = null;
+                fileReplicaPeerStamp = long.MinValue;
+                readableFileReplicaPeers.Clear();
+            }
         }
 
         internal IList<FileBackupView> LatestFileViewsForDisplay(string taskId)
@@ -280,7 +287,7 @@ namespace Backup.Desktop
                     throw new IOException("备份版本数据库未达到所选仓库要求，保留已有备份版本；已完成的数据包等待后续备份或完整性检查处理。");
                 node.ArchiveId = uploaded.Archive.ArchiveId;
                 Catalog.RegisterNodeRevision(node);
-                Catalog.PublishNode(node, files.Files.Select(f => f.ArchiveId));
+                Catalog.PublishNode(node, files.ArchiveIds);
                 Catalog.ClearNodeGarbageReview();
                 try
                 {
@@ -485,6 +492,11 @@ namespace Backup.Desktop
 
         private bool InspectNodeReferences(ISet<string> taskIds, IList<string> errors, Action<string> report)
         {
+            lock (fileReplicaPeerGate)
+            {
+                inspectedFileReplicaPeers.Clear();
+                fileReplicaPeerIdentity = null;
+            }
             inspectedNodeArchives.Clear();
             inspectedNodeArchives.UnionWith(Catalog.LocalBackupNodeReferences());
             inspectedHistoricalArchives.Clear();
@@ -503,7 +515,7 @@ namespace Backup.Desktop
                         if (report != null)
                             report("正在读取备份版本数据库并核对引用：" + node.Id);
                         var files = ReadNodeDatabase(node, cache: cache);
-                        foreach (var file in files.Files)
+                        foreach (var file in files.FileCopies)
                         {
                             ArchiveSummary archive;
                             if (!archives.TryGetValue(file.ArchiveId, out archive) || archive.TaskId != node.TaskId || archive.Status == "cleaned")
@@ -512,12 +524,13 @@ namespace Backup.Desktop
                         }
 
                         if (latestIds.Contains(node.Id))
-                            NodePolicyArchives(node, files);
+                            NodePolicyReferences(node, files);
+                        RememberFileReplicaPeers(files);
 
                         ISet<long> references;
                         if (!inspectedHistoricalArchives.TryGetValue(node.TaskId, out references))
                             inspectedHistoricalArchives[node.TaskId] = references = new HashSet<long>();
-                        references.UnionWith(files.Files.Select(file => file.ArchiveId));
+                        references.UnionWith(files.ArchiveIds);
                         read.Add(HistoricalNodeKey(node));
                     }
                     catch (Exception error)
@@ -533,6 +546,15 @@ namespace Backup.Desktop
             foreach (var group in nodes.GroupBy(node => node.TaskId))
                 if (group.All(node => read.Contains(HistoricalNodeKey(node))))
                     inspectedHistoricalSignatures[group.Key] = HistoricalSignature(group);
+            if (complete)
+            {
+                string identity = ReviewReferenceIdentity();
+                lock (fileReplicaPeerGate)
+                {
+                    fileReplicaPeerIdentity = identity;
+                    fileReplicaPeerStamp = long.MinValue;
+                }
+            }
             return complete;
         }
 

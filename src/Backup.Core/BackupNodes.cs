@@ -32,6 +32,17 @@ namespace Backup.Core
     {
         public long ArchiveId, Size, Modified;
         public string Path, SourcePath, EntryPath, ContentPath;
+        public List<NodeFile> Replicas;
+        public IEnumerable<NodeFile> Copies
+        {
+            get
+            {
+                yield return this;
+                if (Replicas != null)
+                    foreach (var replica in Replicas)
+                        yield return replica;
+            }
+        }
     }
 
     // A node contains only its identity and the effective file list. No task,
@@ -42,6 +53,8 @@ namespace Backup.Core
         public DateTime CreatedUtc;
         public long Revision;
         public readonly List<NodeFile> Files = new List<NodeFile>();
+        public IEnumerable<NodeFile> FileCopies { get { return Files.SelectMany(file => file.Copies); } }
+        public IEnumerable<long> ArchiveIds { get { return FileCopies.Select(file => file.ArchiveId).Distinct(); } }
         public byte[] Serialize()
         {
             return NodeDatabaseCodec.Serialize(this);
@@ -162,6 +175,7 @@ namespace Backup.Core
             database.Execute("CREATE INDEX IF NOT EXISTS file_work.archive_files_path ON archive_files(path,archive_id)");
             database.Execute("CREATE INDEX IF NOT EXISTS file_work.archive_files_state ON archive_files(archive_id,state)");
             database.Execute("CREATE TABLE IF NOT EXISTS file_work.node_basis(task_id TEXT PRIMARY KEY,basis TEXT NOT NULL)");
+            database.Execute("CREATE TABLE IF NOT EXISTS file_work.file_replicas(archive_id INTEGER NOT NULL,path TEXT NOT NULL,replica_id INTEGER NOT NULL,entry_path TEXT NOT NULL,content_path TEXT NOT NULL,PRIMARY KEY(archive_id,path,replica_id))");
             database.Execute("CREATE TEMP TABLE node_gc_allowed(archive_id INTEGER PRIMARY KEY)");
             database.Execute("CREATE TEMP TABLE node_metadata_delete(archive_id INTEGER PRIMARY KEY)");
         }
@@ -417,6 +431,7 @@ namespace Backup.Core
                     .GroupBy(f => f.Path, StringComparer.OrdinalIgnoreCase)
                     .Select(g => g.OrderByDescending(f => f.ArchiveId)
                     .First()));
+                AttachWorkingReplicas(result, taskId);
                 return result;
             }
         }
@@ -441,6 +456,7 @@ namespace Backup.Core
             Transaction(delegate
             {
                 database.Execute("DELETE FROM archive_files WHERE archive_id IN(SELECT id FROM archives WHERE task_id=? AND status<>'writing')", taskId);
+                database.Execute("DELETE FROM file_work.file_replicas WHERE archive_id IN(SELECT id FROM archives WHERE task_id=? AND status<>'writing')", taskId);
                 if (node != null)
                     database.ExecuteMany(
                         "INSERT OR REPLACE INTO archive_files(archive_id,path,size,modified,source_path,entry_path,content_path) VALUES(?,?,?,?,?,?,?)",
@@ -455,6 +471,8 @@ namespace Backup.Core
                         ""
                     })
                     );
+                if (node != null)
+                    SaveWorkingReplicas(node);
                 SetWorkingNodeBasis(taskId, node == null ? "" : node.Id + ":" + node.Revision);
                 RepositoryStatusChanged(CatalogChange.Archives, taskId);
                 return 0;
@@ -466,7 +484,9 @@ namespace Backup.Core
             lock (gate)
             {
                 var rows = new List<FileHistoryRow>();
-                foreach (var batch in files.Files.GroupBy(f => f.ArchiveId))
+                var primary = files.Files.Where(file => file.Replicas != null && file.Replicas.Count > 0)
+                    .ToDictionary(file => file.Path, file => file.ArchiveId, StringComparer.OrdinalIgnoreCase);
+                foreach (var batch in files.FileCopies.GroupBy(f => f.ArchiveId))
                 {
                     var a = GetArchive(batch.Key);
                     if (a.TaskId != node.TaskId)
@@ -479,9 +499,13 @@ namespace Backup.Core
                     if (places.Count == 0)
                         places.Add(new object[] { "", "", "unavailable" });
                     foreach (var file in batch)
+                    {
+                        long original;
+                        primary.TryGetValue(file.Path, out original);
                         foreach (var p in places)
                             rows.Add(new FileHistoryRow {
                                 ArchiveId = file.ArchiveId,
+                                ReplicaOf = original,
                                 TaskId = node.TaskId,
                                 Path = file.Path,
                                 Size = file.Size,
@@ -496,8 +520,15 @@ namespace Backup.Core
                                 DestinationId = (string)p[1],
                                 PlacementStatus = (string)p[2]
                             });
+                    }
                 }
 
+                foreach (var group in rows.Where(row => row.ReplicaOf > 0).GroupBy(row => row.Path, StringComparer.OrdinalIgnoreCase))
+                {
+                    var copies = group.ToList();
+                    foreach (var row in copies)
+                        row.AlternativeCopies = copies;
+                }
                 return rows;
             }
         }

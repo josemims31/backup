@@ -14,7 +14,7 @@ namespace Backup.Desktop
             if (node == null)
                 return false;
             var files = Catalog.ReadLocalBackupNode(node.Id);
-            var selected = files.Files.Where(file => file.ArchiveId == id).ToList();
+            var selected = files.FileCopies.Where(file => file.ArchiveId == id).ToList();
             if (selected.Count == 0)
                 return false;
             // Reuse this inspection's reference evidence. Direct callers may use
@@ -30,7 +30,7 @@ namespace Backup.Desktop
                     var history = ReadCachedNodeDatabase(historical);
                     if (history == null)
                         throw new IOException("无法确认历史版本引用，已保留原包和未完成版本，请先检查完整性。");
-                    references.UnionWith(history.Files.Select(file => file.ArchiveId));
+                    references.UnionWith(history.ArchiveIds);
                 }
 
                 inspectedHistoricalArchives[task.Id] = references;
