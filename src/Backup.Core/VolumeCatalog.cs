@@ -51,6 +51,21 @@ namespace Backup.Core
                     .ToList();
         }
 
+        public IDictionary<long, ISet<string>> RecordedArchivePolicyRoots(string taskId = null)
+        {
+            lock (gate)
+                return database.Query(
+                    "WITH roots AS(SELECT archive_id,group_id FROM archive_pools UNION SELECT p.archive_id,p.group_id FROM placements p " +
+                    "WHERE p.group_id NOT LIKE 'transfer:%' AND NOT EXISTS(SELECT 1 FROM archive_pools a WHERE a.archive_id=p.archive_id)) " +
+                    "SELECT r.archive_id,r.group_id FROM roots r JOIN archives a ON a.id=r.archive_id WHERE ? IS NULL OR a.task_id=? " +
+                    "OR EXISTS(SELECT 1 FROM backup_nodes n WHERE n.archive_id=r.archive_id AND n.task_id=?)",
+                    taskId, taskId, taskId
+                ).GroupBy(row => (long)row[0]).ToDictionary(
+                    group => group.Key,
+                    group => (ISet<string>)new HashSet<string>(group.Select(row => (string)row[1]), StringComparer.Ordinal)
+                );
+        }
+
         private void SavePools(long id, IList<ReplicaPool> pools)
         {
             database.Execute("DELETE FROM archive_pool_members WHERE archive_id=?", id);

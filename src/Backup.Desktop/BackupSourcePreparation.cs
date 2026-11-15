@@ -27,13 +27,16 @@ namespace Backup.Desktop
         {
             latest = Catalog.GetNodes(task.Id).FirstOrDefault();
             previous = latest == null ? null : ReadNodeDatabase(latest);
-            return CompareUnchangedBackup(EligibleBackupSources(indexed).Select(item => new NodeFile { Path = item.ArchivePath, Size = item.Size, Modified = item.Modified }).ToList(), previous);
+            var unchanged = CompareUnchangedBackup(EligibleBackupSources(indexed).Select(item => new NodeFile { Path = item.ArchivePath, Size = item.Size, Modified = item.Modified }).ToList(), previous);
+            return unchanged != null && TaskTargetsRecorded(task, latest, previous) ? unchanged : null;
         }
 
         private DesktopBackupResult UnchangedTaskBackup(BackupTaskDefinition task, IList<NodeFile> current)
         {
             var latest = Catalog.GetNodes(task.Id).FirstOrDefault();
-            return CompareUnchangedBackup(current, latest == null ? null : ReadNodeDatabase(latest));
+            var previous = latest == null ? null : ReadNodeDatabase(latest);
+            var unchanged = CompareUnchangedBackup(current, previous);
+            return unchanged != null && TaskTargetsRecorded(task, latest, previous) ? unchanged : null;
         }
 
         private static DesktopBackupResult CompareUnchangedBackup(IList<NodeFile> current, NodeFileDatabase previous)
@@ -246,7 +249,8 @@ namespace Backup.Desktop
                 coverage[previous.ArchiveId] = covered;
             }
 
-            if (previous.Status == "complete" && !covered)
+            if (!covered && (previous.Status == "complete" || !ArchiveTargetsRecorded(previous.ArchiveId,
+                topology.PolicyRoots ?? topology.Groups.Where(group => !group.Retired).Select(group => group.Id))))
                 return true;
             attention = previous.Status != "complete" || !covered;
             return false;

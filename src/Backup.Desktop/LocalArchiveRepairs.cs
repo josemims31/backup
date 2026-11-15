@@ -27,6 +27,7 @@ namespace Backup.Desktop
         )
         {
             var errors = new List<string>();
+            var latestTargets = LatestArchiveTargets(workspace, taskIds);
             foreach (var group in pending.Where(item => taskIds == null || taskIds.Contains(item.TaskId)).GroupBy(item => item.TaskId).ToList())
             {
                 var nodeRevision = group.Key.StartsWith("__node__:", StringComparison.Ordinal) ? Catalog.NodeRevisions().FirstOrDefault(n => Catalog.GetArchive(n.ArchiveId).TaskId == group.Key) : null;
@@ -78,20 +79,27 @@ namespace Backup.Desktop
                                         continue;
                                 }
 
+                                var archive = Catalog.GetArchive(item.ArchiveId);
+                                var original = OriginalRepackPolicy(archive);
+                                List<string> targets;
+                                bool latest = latestTargets.TryGetValue(item.ArchiveId, out targets);
+                                if (!latest)
+                                    targets = original.Roots;
                                 new ArchiveMaintenance(Catalog, Adapters(true, true))
                                 {
                                     Control = ActiveBackup,
                                     Report = report,
                                     UploadProgress = ReportTransferNotice,
                                     BeforeRetiredDeletion = id => PublishMigrationCatalogs(new HashSet<long> { id }, null, report, synchronize)
-                                }.Migrate(item.ArchiveId, Catalog.LoadTopology().Scope(task.TargetIds), task.RequiredCopies);
+                                }.Migrate(item.ArchiveId, Catalog.LoadTopology().Scope(targets), latest ? targets.Count : original.Copies);
                                 Catalog.ClearArchiveUnrepairable(item.ArchiveId);
                             }
                             catch (Exception error)
                             {
                                 if (!(error is IOException) && !(error is UnauthorizedAccessException) && !(error is NotSupportedException))
                                     throw;
-                                if (nodeRevision != null && error is IOException && RebuildNodePackageFromCache(nodeRevision, task, report))
+                                if (nodeRevision != null && error is IOException && RebuildNodePackageFromCache(nodeRevision, task, report,
+                                    latestTargets.ContainsKey(item.ArchiveId) ? latestTargets[item.ArchiveId] : OriginalRepackPolicy(Catalog.GetArchive(item.ArchiveId)).Roots))
                                     continue;
                                 if (nodeRevision == null && !sourceAttempted && error is IOException)
                                     try

@@ -423,7 +423,8 @@ namespace Backup.Desktop
             }
 
             if (!result.Stopped && result.Archives.Count == 0 && result.RemovedFromScope == 0 && result.ConfirmedDeleted == 0 &&
-                CompareUnchangedBackup(Catalog.CaptureNode(task.Id, "", DateTime.UtcNow).Files, comparedFiles) != null)
+                CompareUnchangedBackup(Catalog.CaptureNode(task.Id, "", DateTime.UtcNow).Files, comparedFiles) != null &&
+                TaskTargetsRecorded(task, comparedNode, comparedFiles))
             {
                 result.NoChanges = true;
                 result.CatalogSkippedUnchanged = true;

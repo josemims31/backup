@@ -440,7 +440,7 @@ namespace Backup.Desktop
             result.Findings.AddRange(CheckInterruptedBackups(adapters, archiveTasks, report));
             if (!formalOnly)
                 result.Findings.AddRange(CheckOwnedTemporaryFiles(adapters, archiveTasks, result.ObsoleteIds));
-            CompleteIntegrityReview(result, snapshots);
+            CompleteIntegrityReview(result, snapshots, false);
             long classifiedRevision = Catalog.RecoveryRevision;
             int classifiedCount = result.Findings.Count;
             var classifiedObsolete = new HashSet<long>(result.ObsoleteIds);
@@ -504,9 +504,12 @@ namespace Backup.Desktop
             if (Catalog.RecoveryRevision != classifiedRevision || result.Findings.Count != classifiedCount || !result.ObsoleteIds.SetEquals(classifiedObsolete))
             {
                 result.ExternalFiles = 0;
-                CompleteIntegrityReview(result, snapshots);
+                CompleteIntegrityReview(result, snapshots, false);
             }
 
+            // Reference recovery may just have restored a missing latest node.
+            // Reuse that local manifest; no additional warehouse walk is needed.
+            ReviewLatestTaskTargets(result);
             result.CatalogStamp = Catalog.DataChangeStamp;
             result.RecoveryRevision = Catalog.RecoveryRevision;
             return result;

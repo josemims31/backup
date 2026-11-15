@@ -76,7 +76,7 @@ namespace Backup.Desktop
             });
         }
 
-        private void CompleteIntegrityReview(AllBackupCheckResult review, IDictionary<string, Dictionary<string, InventoryFolderRecord>> snapshots)
+        private void CompleteIntegrityReview(AllBackupCheckResult review, IDictionary<string, Dictionary<string, InventoryFolderRecord>> snapshots, bool checkTaskTargets = true)
         {
             review.ArchiveTasks = IntegrityTaskIds(review.TaskIds);
             review.Directories = snapshots.ToDictionary(pair => pair.Key, pair => pair.Value.Values.Select(value => value.Folder).Distinct().ToList());
@@ -351,6 +351,8 @@ namespace Backup.Desktop
 
             review.Findings.Clear();
             review.Findings.AddRange(indexed.Items);
+            if (checkTaskTargets)
+                ReviewLatestTaskTargets(review);
             review.ManagedUnregistered = review.Findings.Count(item => item.RepairAction == "delete-orphan" || item.RepairAction == "register-copy");
             review.RegistrationAnomalies = review.Findings.Count(item => item.RepairAction == "remove-obsolete-registration" || item.RepairAction == "clear-absent-record");
             review.TaskScope = ReviewScope(review.TaskIds);
@@ -791,6 +793,7 @@ namespace Backup.Desktop
 
                 if (UnregisterReviewedInterrupted(review))
                     review = ReviewCommittedInventory(review);
+                ReviewLatestTaskTargets(review);
                 bool repairCatalog = review.Findings.Any(item => item.ArchiveId > 0 && item.RequiresManualRepairConfirmation && !review.ObsoleteIds.Contains(item.ArchiveId) &&
                     Catalog.GetArchive(item.ArchiveId)
                     .TaskId == "__catalog__");

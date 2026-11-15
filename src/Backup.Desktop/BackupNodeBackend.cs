@@ -119,6 +119,8 @@ namespace Backup.Desktop
         {
             lock (browseNodeGate)
                 browseNodeSnapshots.Clear();
+            lock (taskPolicyReferences)
+                taskPolicyReferences.Clear();
         }
 
         internal IList<FileBackupView> LatestFileViewsForDisplay(string taskId)
@@ -490,6 +492,7 @@ namespace Backup.Desktop
             bool complete = true;
             var archives = Catalog.ListArchives(true).ToDictionary(a => a.ArchiveId);
             var nodes = Catalog.GetNodes().Where(n => taskIds == null || taskIds.Contains(n.TaskId)).ToList();
+            var latestIds = new HashSet<string>(nodes.GroupBy(node => node.TaskId).Select(group => group.First().Id));
             var read = new HashSet<string>();
             using (var cache = new MemoryReadCache(Math.Max(ArchiveObjectIO.MaximumVolumeBytes, MemoryLimitBytes / 3), TransferMemory))
                 foreach (var node in nodes)
@@ -507,6 +510,9 @@ namespace Backup.Desktop
                                 throw new IOException("备份版本含有无效的数据包引用。");
                             inspectedNodeArchives.Add(file.ArchiveId);
                         }
+
+                        if (latestIds.Contains(node.Id))
+                            NodePolicyArchives(node, files);
 
                         ISet<long> references;
                         if (!inspectedHistoricalArchives.TryGetValue(node.TaskId, out references))
@@ -530,7 +536,7 @@ namespace Backup.Desktop
             return complete;
         }
 
-        private bool RebuildNodePackageFromCache(BackupNode damaged, BackupTaskDefinition task, Action<string> report)
+        private bool RebuildNodePackageFromCache(BackupNode damaged, BackupTaskDefinition task, Action<string> report, IList<string> targets)
         {
             var current = Catalog.GetNodes(task.Id).FirstOrDefault(n => n.Id == damaged.Id && n.ArchiveId == damaged.ArchiveId);
             if (current == null || Catalog.HasOutstandingTransfer(damaged.ArchiveId))
@@ -542,6 +548,7 @@ namespace Backup.Desktop
             if (files == null || files.Revision != current.Revision)
                 return false;
             var repairTask = JsonSettings.Decode(JsonSettings.Encode(task), new BackupTaskDefinition());
+            repairTask.TargetIds = targets.ToList();
             repairTask.UseCustomPassword = true;
             repairTask.Password = Catalog.GetArchivePassword(damaged.ArchiveId);
             if (report != null)
