@@ -298,10 +298,15 @@ namespace Backup.Core
 
         public ISet<long> LocalBackupNodeReferences()
         {
+            return LocalBackupNodeReferences(null);
+        }
+
+        public ISet<long> LocalBackupNodeReferences(ISet<string> taskIds)
+        {
             lock (gate)
             {
                 var result = new HashSet<long>();
-                foreach (var node in GetLocalBackupNodes())
+                foreach (var node in GetLocalBackupNodes().Where(node => taskIds == null || taskIds.Contains(node.TaskId)))
                     foreach (long id in ReadLocalBackupNode(node.Id).ArchiveIds)
                     {
                         var archive = GetArchive(id);

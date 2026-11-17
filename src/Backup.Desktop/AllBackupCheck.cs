@@ -18,8 +18,6 @@ namespace Backup.Desktop
         internal string TaskScope, Topology;
         internal long CatalogStamp, RecoveryRevision;
         internal bool Completed;
-        internal HashSet<long> ReferencedArchives;
-        internal string ReferenceIdentity;
         public CleanupResult Cleanup;
         public List<string> Errors = new List<string>();
         public List<IntegrityFinding> Findings = new List<IntegrityFinding>();
@@ -427,7 +425,6 @@ namespace Backup.Desktop
                     return adapter;
                 }
                 );
-            var scope = taskIds == null ? null : new HashSet<string>(taskIds);
             result.Findings.AddRange(CheckPendingUploads(archiveTasks, false, result.ObsoleteIds, true, formalOnly));
             var engine = new GroupedBackupEngine(Catalog, adapters, Path.Combine(BaseDirectory, "7za.dll"));
             foreach (var archive in archives.Where(item => !result.ObsoleteIds.Contains(item.ArchiveId)))
@@ -441,74 +438,12 @@ namespace Backup.Desktop
             if (!formalOnly)
                 result.Findings.AddRange(CheckOwnedTemporaryFiles(adapters, archiveTasks, result.ObsoleteIds));
             CompleteIntegrityReview(result, snapshots, false);
-            long classifiedRevision = Catalog.RecoveryRevision;
-            int classifiedCount = result.Findings.Count;
-            var classifiedObsolete = new HashSet<long>(result.ObsoleteIds);
-            // Only a complete warehouse walk can prove a name is absent. Partial
-            // task checks and failed folders retain the existing remote fallback.
-            if (taskIds == null)
-                maintenanceSearch.Value.SearchInventory = destination =>
-                {
-                    Dictionary<string, InventoryFolderRecord> folders;
-                    if (!snapshots.TryGetValue(destination.Id, out folders) || folders.Values.Any(record => !string.IsNullOrEmpty(record.Error)))
-                        return null;
-                    var entries = new Dictionary<string, IList<StorageEntry>>();
-                    foreach (var record in folders.Values)
-                        entries[ObjectStoragePath.Relative(destination, record.Folder)] = JsonSettings.Decode(record.Json, new List<StorageEntry>());
-                    return entries;
-                };
-            bool referencesComplete = InspectNodeReferences(scope, result.Errors, report);
-            if (referencesComplete)
-            {
-                result.ReferencedArchives = new HashSet<long>(inspectedNodeArchives);
-                result.ReferenceIdentity = ReviewReferenceIdentity();
-            }
-
-            if (referencesComplete)
-            {
-                var removed = Catalog.UnregisterUnreferencedInterruptedArchives(inspectedNodeArchives, archiveTasks);
-                result.Findings.RemoveAll(finding => removed.Contains(finding.ArchiveId));
-                result.ObsoleteIds.ExceptWith(removed);
-            }
-
             if (taskIds == null && result.Errors.Count == 0 &&
                 !result.Findings.Any(f => f.Status.StartsWith("unavailable", StringComparison.Ordinal) || f.Status == "confirmation-pending"))
                 foreach (var destination in topology.Destinations)
                     Catalog.AcceptInspectedStorageGrowth(destination.Id, result.Findings);
-            if (taskIds == null && result.Errors.Count == 0 &&
-                !result.Findings.Any(f => f.Status.StartsWith("unavailable", StringComparison.Ordinal) || f.Status == "confirmation-pending") &&
-                Catalog.PendingVolumeTransfers()
-                .Count == 0 &&
-                Catalog.PendingUploadStages()
-                .Count == 0)
-            {
-                try
-                {
-                    if (referencesComplete)
-                        result.ObsoleteIds.UnionWith(MarkUnreferencedNodeData(result.ReferencedArchives));
-                }
-                catch (IOException error)
-                {
-                    result.Errors.Add("无引用数据核对未完成：" + error.Message);
-                }
-                catch (UnauthorizedAccessException error)
-                {
-                    result.Errors.Add("无引用数据核对未完成：" + error.Message);
-                }
-                finally
-                {
-                    Catalog.ClearNodeGarbageReview();
-                }
-            }
-
-            if (Catalog.RecoveryRevision != classifiedRevision || result.Findings.Count != classifiedCount || !result.ObsoleteIds.SetEquals(classifiedObsolete))
-            {
-                result.ExternalFiles = 0;
-                CompleteIntegrityReview(result, snapshots, false);
-            }
-
-            // Reference recovery may just have restored a missing latest node.
-            // Reuse that local manifest; no additional warehouse walk is needed.
+            // Check only recorded objects against the directory inventory. Version
+            // contents and unreferenced-package collection belong to repair/compaction.
             ReviewLatestTaskTargets(result);
             result.CatalogStamp = Catalog.DataChangeStamp;
             result.RecoveryRevision = Catalog.RecoveryRevision;

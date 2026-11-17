@@ -85,19 +85,14 @@ namespace Backup.Desktop
 
         private bool RebuildFileReplicaArchive(long id, BackupTaskDefinition task, Action<string> report)
         {
-            lock (fileReplicaPeerGate)
-                if (!inspectedFileReplicaPeers.ContainsKey(id))
-                    return false;
             if (Catalog.HasOutstandingTransfer(id) || Catalog.GetLocalBackupNodes(task.Id).Any(node => Catalog.ReadLocalBackupNode(node.Id).ArchiveIds.Contains(id)))
                 return false;
             var states = new List<RepackNode>();
             var selected = new Dictionary<string, NodeFile>(StringComparer.Ordinal);
             var alternatives = new Dictionary<string, List<NodeFile>>(StringComparer.Ordinal);
-            foreach (var node in Catalog.GetNodes(task.Id))
+            var referenceErrors = new List<string>();
+            bool complete = InspectNodeReferences(new HashSet<string> { task.Id }, referenceErrors, report, (node, files) =>
             {
-                var files = ReadCachedNodeDatabase(node);
-                if (files == null)
-                    return false;
                 states.Add(new RepackNode { Node = node, References = new HashSet<long>(files.ArchiveIds) });
                 foreach (var file in files.Files)
                     foreach (var copy in file.Copies.Where(copy => copy.ArchiveId == id))
@@ -112,7 +107,9 @@ namespace Backup.Desktop
                             alternatives[key] = values = new List<NodeFile>();
                         values.AddRange(file.Copies.Where(other => other.ArchiveId != id));
                     }
-            }
+            });
+            if (!complete)
+                throw new IOException(string.Join("；", referenceErrors));
             if (selected.Count == 0 || !alternatives.Values.Any(values => values.Count > 0))
                 return false;
             var readable = new Dictionary<long, bool>();

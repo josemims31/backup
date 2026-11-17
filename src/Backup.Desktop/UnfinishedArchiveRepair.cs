@@ -17,21 +17,20 @@ namespace Backup.Desktop
             var selected = files.FileCopies.Where(file => file.ArchiveId == id).ToList();
             if (selected.Count == 0)
                 return false;
-            // Reuse this inspection's reference evidence. Direct callers may use
-            // verified local node caches, but must never guess about unread history.
+            // Read this task's retained versions only when source reconstruction
+            // actually needs to prove that an unfinished archive is unreferenced.
             var historicalNodes = Catalog.GetNodes(task.Id);
             string signature = HistoricalSignature(historicalNodes), inspected;
             ISet<long> references;
             if (!inspectedHistoricalSignatures.TryGetValue(task.Id, out inspected) || inspected != signature)
             {
                 references = new HashSet<long>();
-                foreach (var historical in historicalNodes)
-                {
-                    var history = ReadCachedNodeDatabase(historical);
-                    if (history == null)
-                        throw new IOException("无法确认历史版本引用，已保留原包和未完成版本，请先检查完整性。");
-                    references.UnionWith(history.ArchiveIds);
-                }
+                using (var cache = new MemoryReadCache(Math.Max(ArchiveObjectIO.MaximumVolumeBytes, MemoryLimitBytes / 3), TransferMemory))
+                    foreach (var historical in historicalNodes)
+                    {
+                        var history = ReadNodeDatabase(historical, cache: cache);
+                        references.UnionWith(history.ArchiveIds);
+                    }
 
                 inspectedHistoricalArchives[task.Id] = references;
                 inspectedHistoricalSignatures[task.Id] = signature;

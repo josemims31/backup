@@ -33,7 +33,7 @@ namespace Backup.Desktop
                 archive.Status != "cleaned" &&
                 (archive.CurrentValidCopies < archive.TargetCopies ||
                 archive.Status == "repair-required") &&
-                current.Contains(archive.ArchiveId))
+                (current.Contains(archive.ArchiveId) || Catalog.IsNodeArchive(archive.ArchiveId)))
                 .ToList();
         }
 

@@ -5,6 +5,12 @@ using Backup.Core;
 
 namespace Backup.Desktop
 {
+    public sealed class TaskPolicyReferenceSnapshot
+    {
+        public string Key;
+        public List<long[]> FileArchives = new List<long[]>();
+    }
+
     public sealed partial class DesktopBackend
     {
         private sealed class TaskPolicyReferences
@@ -22,9 +28,27 @@ namespace Backup.Desktop
             lock (taskPolicyReferences)
                 if (taskPolicyReferences.TryGetValue(node.TaskId, out cached) && cached.Key == key)
                     return cached;
-            files = files ?? ReadCachedNodeDatabase(node);
+            string setting = "latest_node_policy_refs_v1:" + node.TaskId;
+            bool verified = files != null;
             if (files == null)
-                return null;
+            {
+                var snapshot = JsonSettings.Decode(Catalog.GetSetting(setting), new TaskPolicyReferenceSnapshot());
+                if (snapshot.Key == key && snapshot.FileArchives != null && snapshot.FileArchives.All(ids => ids != null && ids.Length > 0))
+                {
+                    cached = new TaskPolicyReferences
+                    {
+                        Key = key,
+                        Archives = new HashSet<long>(snapshot.FileArchives.SelectMany(ids => ids).Concat(new[] { node.ArchiveId })),
+                        FileArchives = snapshot.FileArchives
+                    };
+                    lock (taskPolicyReferences)
+                        taskPolicyReferences[node.TaskId] = cached;
+                    return cached;
+                }
+                // Older catalogs can reuse their working-file metadata. This reads
+                // neither a version database nor archive content during a check.
+                files = Catalog.CaptureNode(node.TaskId, node.Id, node.CreatedUtc);
+            }
             // Unchanged files in the same packages share a policy calculation.
             var primaryOnly = new HashSet<long>();
             var combinations = new Dictionary<string, long[]>(StringComparer.Ordinal);
@@ -45,8 +69,18 @@ namespace Backup.Desktop
                 Archives = new HashSet<long>(fileArchives.SelectMany(ids => ids).Concat(new[] { node.ArchiveId })),
                 FileArchives = fileArchives
             };
-            lock (taskPolicyReferences)
-                taskPolicyReferences[node.TaskId] = references;
+            if (verified)
+            {
+                lock (taskPolicyReferences)
+                    taskPolicyReferences[node.TaskId] = references;
+                var latest = Catalog.GetNodes(node.TaskId).FirstOrDefault();
+                if (latest != null && HistoricalNodeKey(latest) == key)
+                {
+                    string encoded = JsonSettings.Encode(new TaskPolicyReferenceSnapshot { Key = key, FileArchives = fileArchives });
+                    if (Catalog.GetSetting(setting) != encoded)
+                        Catalog.SetSetting(setting, encoded);
+                }
+            }
             return references;
         }
 
@@ -81,8 +115,6 @@ namespace Backup.Desktop
                 var latest = Catalog.GetNodes(task.Id).FirstOrDefault();
                 if (latest == null)
                     continue;
-                // Checking targets must not download data or fetch a missing node
-                // independently of the existing version-reference recovery step.
                 var references = NodePolicyReferences(latest);
                 var ids = references == null ? new HashSet<long> { latest.ArchiveId } : references.Archives;
                 foreach (long id in ids)

@@ -231,11 +231,13 @@ namespace Backup.Desktop
                     candidates.Remove(id);
                 var states = new List<RepackNode>();
                 var files = new Dictionary<string, NodeFile>(StringComparer.Ordinal);
+                var retainedNodes = Catalog.GetNodes();
+                var latestNodeIds = new HashSet<string>(retainedNodes.GroupBy(node => node.TaskId).Select(group => group.First().Id));
                 bool complete = true;
                 // Each logical version is read once. A shared physical node
                 // package uses this same bounded encrypted-volume cache.
                 using (var cache = new MemoryReadCache(Math.Max(ArchiveObjectIO.MaximumVolumeBytes, MemoryLimitBytes / 3), TransferMemory))
-                    foreach (var node in Catalog.GetNodes())
+                    foreach (var node in retainedNodes)
                     {
                         RepackCheckpoint("read-node");
                         if (report != null)
@@ -263,6 +265,8 @@ namespace Backup.Desktop
                             }
 
                             states.Add(state);
+                            if (latestNodeIds.Contains(node.Id))
+                                NodePolicyReferences(node, db);
                         }
                         catch (Exception error)
                         {
@@ -424,7 +428,7 @@ namespace Backup.Desktop
                     }
                 }
                 else if (oldData.Count > 0)
-                    result.Errors.Add("部分版本无法读取或仍有上传待确认，旧数据包已全部保留，等待修复完整性回收。");
+                    result.Errors.Add("部分版本无法读取或仍有上传待确认，旧数据包已全部保留，请稍后重新整理。");
                 RepackCheckpoint("after-repack-delete");
                 return result;
             }

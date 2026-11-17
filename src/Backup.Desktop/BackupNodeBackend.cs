@@ -288,6 +288,7 @@ namespace Backup.Desktop
                 node.ArchiveId = uploaded.Archive.ArchiveId;
                 Catalog.RegisterNodeRevision(node);
                 Catalog.PublishNode(node, files.ArchiveIds);
+                NodePolicyReferences(node, files);
                 Catalog.ClearNodeGarbageReview();
                 try
                 {
@@ -490,7 +491,7 @@ namespace Backup.Desktop
             return string.Join("\n", nodes.Select(HistoricalNodeKey).OrderBy(key => key, StringComparer.Ordinal));
         }
 
-        private bool InspectNodeReferences(ISet<string> taskIds, IList<string> errors, Action<string> report)
+        private bool InspectNodeReferences(ISet<string> taskIds, IList<string> errors, Action<string> report, Action<BackupNode, NodeFileDatabase> inspected = null)
         {
             lock (fileReplicaPeerGate)
             {
@@ -498,7 +499,7 @@ namespace Backup.Desktop
                 fileReplicaPeerIdentity = null;
             }
             inspectedNodeArchives.Clear();
-            inspectedNodeArchives.UnionWith(Catalog.LocalBackupNodeReferences());
+            inspectedNodeArchives.UnionWith(Catalog.LocalBackupNodeReferences(taskIds));
             inspectedHistoricalArchives.Clear();
             inspectedHistoricalSignatures.Clear();
             bool complete = true;
@@ -526,6 +527,8 @@ namespace Backup.Desktop
                         if (latestIds.Contains(node.Id))
                             NodePolicyReferences(node, files);
                         RememberFileReplicaPeers(files);
+                        if (inspected != null)
+                            inspected(node, files);
 
                         ISet<long> references;
                         if (!inspectedHistoricalArchives.TryGetValue(node.TaskId, out references))
@@ -603,30 +606,5 @@ namespace Backup.Desktop
             return new List<string>();
         }
 
-        // All retained databases have already been read once by the inspection.
-        private ISet<long> MarkUnreferencedNodeData(ISet<long> referenced)
-        {
-            Catalog.ClearNodeGarbageReview();
-            if (Catalog.HasStorageGrowth())
-                throw new IOException("目录扩展尚未完成，本次保留旧包；下次写入该目录时继续完成扩展。");
-            if (Catalog.PendingVolumeTransfers().Count > 0 || Catalog.PendingUploadStages().Count > 0)
-                throw new IOException("仍有上传结果或临时文件待确认，本次跳过空间回收。");
-            var revisions = Catalog.NodeRevisions();
-            var metadata = new HashSet<string>(revisions.Select(n => n.Id + ":" + n.ArchiveId));
-            foreach (var node in Catalog.GetNodes())
-                if (!metadata.Contains(node.Id + ":" + node.ArchiveId))
-                    throw new IOException("备份版本数据库副本未确认，本次跳过空间回收：" + node);
-            // Checking may expire local registrations, but only explicit repair
-            // may remove the corresponding remote objects.
-            try
-            {
-                Catalog.AllowNodeGarbage(referenced);
-                return new HashSet<long>(Catalog.GetGarbageCandidates(false));
-            }
-            finally
-            {
-                Catalog.ClearNodeGarbageReview();
-            }
-        }
     }
 }

@@ -432,9 +432,7 @@ namespace Backup.Desktop
             var scope = IntegrityTaskIds(original.TaskIds);
             var result = new AllBackupCheckResult
             {
-                TaskIds = original.TaskIds,
-                ReferencedArchives = original.ReferencedArchives,
-                ReferenceIdentity = original.ReferenceIdentity
+                TaskIds = original.TaskIds
             };
             result.Errors.AddRange(original.Errors);
             result.ObsoleteIds.UnionWith(Catalog.ObsoleteOwnedArchiveIds(scope));
@@ -559,7 +557,6 @@ namespace Backup.Desktop
         private IList<string> RepairReviewFiles(AllBackupCheckResult review, Action<string> report)
         {
             var errors = DeleteUnregisteredTemporaryFiles(review, report).Errors.ToList();
-            var unreferenced = ReviewedUnreferencedInterrupted(review);
             var corrections = new Dictionary<long, List<IntegrityFinding>>();
             var obsolete = new HashSet<long>(review.Findings.Where(item => item.RepairAction == "remove-obsolete-registration").Select(item => item.ArchiveId));
             var removed = obsolete.Count == 0 ? new HashSet<long>() : new HashSet<long>(Catalog.UnregisterUnusedCatalogSnapshots(DatabaseBackupTargets(), false, obsolete));
@@ -652,8 +649,6 @@ namespace Backup.Desktop
                     var owner = Catalog.ListArchives(true).FirstOrDefault(a => a.ArchiveName == BackupObjectNaming.ArchiveName(finding.Name) && a.Status != "cleaned");
                     if (owner != null && !review.ObsoleteIds.Contains(owner.ArchiveId) && !Catalog.HasCompleteArchiveManifest(owner.ArchiveId))
                     {
-                        if (unreferenced.Contains(owner.ArchiveId))
-                            continue;
                         errors.Add(finding.Name + "：分卷清单缺失或不完整，已保留现有文件及版本引用。");
                         continue;
                     }
@@ -758,41 +753,6 @@ namespace Backup.Desktop
                     review = ReviewLocalInventory(taskIds);
                 else if (taskDeletesAttempted || review.RecoveryRevision != Catalog.RecoveryRevision)
                     review = ReviewCommittedInventory(review);
-                if (review.ReferenceIdentity != ReviewReferenceIdentity())
-                {
-                    var referenceErrors = new List<string>();
-                    if (InspectNodeReferences(taskIds, referenceErrors, report))
-                    {
-                        review.ReferencedArchives = new HashSet<long>(inspectedNodeArchives);
-                        review.ReferenceIdentity = ReviewReferenceIdentity();
-                    }
-                    else
-                        review.ReferencedArchives = null;
-                    rotationErrors.AddRange(referenceErrors);
-                }
-
-                if (review.ReferencedArchives != null && taskIds == null && review.Errors.Count == 0 &&
-                    !review.Findings.Any(item => item.Status.StartsWith("unavailable", StringComparison.Ordinal) ||
-                    item.Status == "confirmation-pending") &&
-                    Catalog.PendingVolumeTransfers()
-                    .Count == 0 &&
-                    Catalog.PendingUploadStages()
-                    .Count == 0)
-                    try
-                    {
-                        review.ObsoleteIds.UnionWith(MarkUnreferencedNodeData(review.ReferencedArchives));
-                    }
-                    catch (IOException error)
-                    {
-                        rotationErrors.Add("无引用数据核对未完成：" + error.Message);
-                    }
-                    catch (UnauthorizedAccessException error)
-                    {
-                        rotationErrors.Add("无引用数据核对未完成：" + error.Message);
-                    }
-
-                if (UnregisterReviewedInterrupted(review))
-                    review = ReviewCommittedInventory(review);
                 ReviewLatestTaskTargets(review);
                 bool repairCatalog = review.Findings.Any(item => item.ArchiveId > 0 && item.RequiresManualRepairConfirmation && !review.ObsoleteIds.Contains(item.ArchiveId) &&
                     Catalog.GetArchive(item.ArchiveId)
@@ -803,8 +763,6 @@ namespace Backup.Desktop
                 errors.AddRange(temporaryErrors);
                 QueuePendingUploadDamage(workspace, CheckPendingUploads(taskIds, true, review.ObsoleteIds, false, true));
                 review.ObsoleteIds.RemoveWhere(id => Catalog.ArchiveHasCurrentFiles(id));
-                if (review.ObsoleteIds.Count > 0 && review.ReferencedArchives != null && review.ReferenceIdentity == ReviewReferenceIdentity() && taskIds == null)
-                    Catalog.AllowNodeGarbage(review.ReferencedArchives, review.ObsoleteIds);
                 foreach (long id in review.ObsoleteIds)
                     try
                     {
@@ -835,7 +793,6 @@ namespace Backup.Desktop
                 errors.AddRange(RunConfirmedRepairs(workspace, report, IntegrityTaskIds(taskIds), progress, cleanupProgress, false, true, repairIds, false, true));
                 // Reclassify entries exposed by intent cleanup or unregistration using
                 // committed inventory changes, without repeating directory enumeration.
-                UnregisterReviewedInterrupted(review);
                 var residual = ReviewCommittedInventory(review);
                 var attempted = new HashSet<string>(review.Findings.Where(item => item.RepairAction == "delete-orphan").Select(item => item.Destination + "\0" + item.Folder + "\0" + item.Name));
                 var newOrphans = new AllBackupCheckResult
@@ -852,7 +809,6 @@ namespace Backup.Desktop
                 // formerly anomalous names are statted; never repeat a full tree scan.
                 FlushRepositoryResults();
                 var currentReview = ReviewCommittedInventory(review);
-                var unreferenced = ReviewedUnreferencedInterrupted(currentReview);
                 var remaining = new List<string>();
                 Dictionary<string, DestinationDefinition> recheckDefinitions = null;
                 // A repaired pool may retain a different member. Verify current
@@ -873,12 +829,6 @@ namespace Backup.Desktop
 
                         if (finding.ArchiveLevel)
                         {
-                            if (unreferenced.Contains(finding.ArchiveId))
-                            {
-                                remaining.Add(finding.Name + "：备份未完成，残留文件或上传记录仍待清理；不属于有效备份版本引用。");
-                                continue;
-                            }
-
                             if (finding.ArchiveId > 0)
                             {
                                 var archive = Catalog.GetArchive(finding.ArchiveId);

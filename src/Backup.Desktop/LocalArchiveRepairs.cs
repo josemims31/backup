@@ -27,6 +27,8 @@ namespace Backup.Desktop
         )
         {
             var errors = new List<string>();
+            if (pending.Count == 0)
+                return errors;
             var latestTargets = LatestArchiveTargets(workspace, taskIds);
             foreach (var group in pending.Where(item => taskIds == null || taskIds.Contains(item.TaskId)).GroupBy(item => item.TaskId).ToList())
             {
