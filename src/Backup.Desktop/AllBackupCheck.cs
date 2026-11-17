@@ -430,7 +430,7 @@ namespace Backup.Desktop
             foreach (var archive in archives.Where(item => !result.ObsoleteIds.Contains(item.ArchiveId)))
             {
                 if (report != null)
-                    report("正在核对备份包：" + archive.ArchiveName);
+                    report("正在比对文件列表：" + archive.ArchiveName);
                 result.Findings.AddRange(engine.CheckIntegrity(archive.ArchiveId, OperationCancellation, true));
             }
 
