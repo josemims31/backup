@@ -132,6 +132,8 @@ namespace Backup.Desktop
 
                 if (!SameOpenListAccount(session, apiBase, options.Username))
                     return;
+                if (session.OpenListRequiresTwoFactor.HasValue || options.OpenListToken != session.OpenListToken)
+                    options.OpenListRequiresTwoFactor = session.OpenListRequiresTwoFactor;
                 options.OpenListApiBase = apiBase;
                 options.OpenListUsername = options.Username;
                 options.OpenListToken = session.OpenListToken;
@@ -147,7 +149,8 @@ namespace Backup.Desktop
                 try
                 {
                     var saved = UnprotectConnection(old);
-                    if (SameOpenListAccount(saved, options.OpenListApiBase, options.Username) && saved.OpenListToken == options.OpenListToken)
+                    if (SameOpenListAccount(saved, options.OpenListApiBase, options.Username) && saved.OpenListToken == options.OpenListToken &&
+                        saved.OpenListRequiresTwoFactor == options.OpenListRequiresTwoFactor)
                         return null;
                 }
                 catch (CryptographicException diagnosticFailure)
@@ -164,6 +167,7 @@ namespace Backup.Desktop
                 Username = options.Username,
                 OpenListUsername = options.Username,
                 OpenListApiBase = options.OpenListApiBase,
+                OpenListRequiresTwoFactor = options.OpenListRequiresTwoFactor,
                 OpenListToken = options.OpenListToken
             };
             return new KeyValuePair<string, string>(key, ProtectConnection(session));

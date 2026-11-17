@@ -55,6 +55,8 @@ namespace Backup.Core
     {
         [DataMember(Name = "username")]
         public string Username;
+        [DataMember(Name = "otp")]
+        public bool? RequiresTwoFactor;
     }
 
     [DataContract]
@@ -424,6 +426,7 @@ namespace Backup.Core
                     Username = connection.Username,
                     Password = connection.Password,
                     OpenListUploadOptimization = connection.OpenListUploadOptimization,
+                    OpenListRequiresTwoFactor = connection.OpenListRequiresTwoFactor,
                     OpenListApiBase = connection.OpenListApiBase,
                     OpenListUsername = connection.OpenListUsername,
                     OpenListToken = connection.OpenListToken
@@ -463,6 +466,8 @@ namespace Backup.Core
                 return;
             lock (openListGate)
             {
+                if (authorized.OpenListRequiresTwoFactor.HasValue)
+                    connection.OpenListRequiresTwoFactor = authorized.OpenListRequiresTwoFactor;
                 if (connection.OpenListToken == authorized.OpenListToken && connection.OpenListApiBase == authorized.OpenListApiBase)
                     return;
                 connection.OpenListToken = authorized.OpenListToken;
@@ -747,6 +752,8 @@ namespace Backup.Core
                         var user = OpenListCall<OpenListUser>(openListBase, "me", "GET", null, true, OperationCancellation);
                         if (user != null && user.Username == connection.Username)
                         {
+                            if (user.RequiresTwoFactor.HasValue)
+                                connection.OpenListRequiresTwoFactor = user.RequiresTwoFactor;
                             openListCapability.Authorized = true;
                             AcceptOpenListToken();
                             return;
@@ -761,9 +768,8 @@ namespace Backup.Core
                     connection.OpenListToken = "";
                 }
 
-                // Login is only submitted after the user confirms the authorization
-                // form. Missing/invalid tokens during backup never trigger password
-                // or empty-OTP probes, including the normal upload retry loop.
+                // A non-null OTP comes from explicit authorization or the desktop's
+                // single shared renewal attempt for a previously authorized account.
                 if (otp == null)
                     throw new OpenListAuthorizationException(false);
                 lock (loginCooldownGate)
@@ -800,6 +806,7 @@ namespace Backup.Core
                 connection.OpenListToken = result.Token;
                 connection.OpenListApiBase = openListBase;
                 connection.OpenListUsername = connection.Username;
+                connection.OpenListRequiresTwoFactor = !string.IsNullOrEmpty(otp);
                 openListCapability.Authorized = true;
                 AcceptOpenListToken();
             }

@@ -15,7 +15,7 @@ namespace Backup.Core
     public class OpenListAuthorizationException : IOException
     {
         public readonly bool RequiresTwoFactor;
-        internal readonly bool TokenRejected;
+        public readonly bool TokenRejected;
         public OpenListAuthorizationException(bool otp) : this(otp, otp ? "OpenList 需要二步验证码；未启用2FA的账号无需验证码。" : "OpenList 尚未授权或授权已失效，请编辑仓库并保存以完成授权。")
         {
         }

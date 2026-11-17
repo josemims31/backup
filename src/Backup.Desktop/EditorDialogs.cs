@@ -421,6 +421,7 @@ namespace Backup.Desktop
                     PrivateKeyPath = key ? privateKey.Text.Trim() : "",
                     PrivateKeyPassphrase = key ? keyPassphrase.Password : "",
                     OpenListUploadOptimization = openList.IsChecked == true,
+                    OpenListRequiresTwoFactor = username.Text.Trim() == options.Username && remotePassword.Password == options.Password ? options.OpenListRequiresTwoFactor : null,
                     OpenListToken = username.Text.Trim() == options.Username && remotePassword.Password == options.Password ? options.OpenListToken : "",
                     OpenListApiBase = options.OpenListApiBase,
                     OpenListUsername = options.OpenListUsername

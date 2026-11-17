@@ -92,7 +92,7 @@ namespace Backup.Desktop
                     if (entry.OpenList != null)
                     {
                         entry.OpenList.RenewOpenListAuthorization = RenewRepairOpenListAuthorization;
-                        entry.OpenList.OpenListWebDavFallback = () => OpenListFallbackActive(destination.Location, options.Username);
+                        entry.OpenList.OpenListWebDavFallback = () => UseOpenListWebDavFallback(destination.Location, options);
                         entry.OpenList.UploadDiagnostic += message => RuntimeLog.Append(BaseDirectory, "upload-errors.log", message);
                     }
 

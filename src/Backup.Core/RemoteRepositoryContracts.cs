@@ -20,6 +20,7 @@ namespace Backup.Core
         public string PrivateKeyPath = "";
         public string PrivateKeyPassphrase = "";
         public bool? OpenListUploadOptimization;
+        public bool? OpenListRequiresTwoFactor;
         public string OpenListApiBase = "", OpenListToken = "", OpenListUsername = "";
     }
 

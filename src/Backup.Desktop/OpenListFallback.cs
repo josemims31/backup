@@ -152,7 +152,7 @@ namespace Backup.Desktop
             return names.Count == 0 ? null : "OpenList 授权待恢复，已改用普通 WebDAV：" + string.Join("、", names) + "。请编辑仓库重新授权；已提交的文件继续核对，不重复上传。";
         }
 
-        private bool RequestOpenListAuthorization(string location, RemoteConnectionOptions options)
+        private bool RequestOpenListAuthorization(string location, RemoteConnectionOptions options, bool automaticOnly = false)
         {
             var token = ActiveBackup == null ? OperationCancellation : ActiveBackup.Token;
             token.ThrowIfCancellationRequested();
@@ -169,19 +169,15 @@ namespace Backup.Desktop
                     global::Backup.Core.RuntimeDiagnostics.Record("Backup.Desktop/OpenListFallback.cs:RequestOpenListAuthorization", diagnosticFailure);
                 }
 
-            if (OpenListFallbackActive(location, options.Username))
-                return false;
+            automaticOnly |= OpenListFallbackActive(location, options.Username);
             var prompt = OpenListAuthorizationPrompt;
             var legacy = repairOpenListAuthorization;
-            if (prompt == null && legacy == null)
-                return false;
             string key = OpenListSessionKey(OpenListAuthorization.OpenListServiceAddress(location), options.Username);
             TaskCompletionSource<bool> flight;
             bool leader = false;
             lock (authorizationFlightsGate)
             {
-                if (OpenListFallbackActive(location, options.Username))
-                    return false;
+                automaticOnly |= OpenListFallbackActive(location, options.Username);
                 previous = options.OpenListToken;
                 LoadSharedOpenListAuthorization(location, options);
                 if (previous != options.OpenListToken)
@@ -197,7 +193,7 @@ namespace Backup.Desktop
 
                 if (!authorizationFlights.TryGetValue(key, out flight))
                 {
-                    if (prompt == null)
+                    if (!automaticOnly && prompt == null && legacy != null)
                         lock (repairAuthorizationGate)
                         {
                             if (!repairAuthorizations.Add(key))
@@ -214,11 +210,13 @@ namespace Backup.Desktop
             {
                 try
                 {
-                    bool accepted = prompt != null ? prompt(location, options, token) : legacy(location, options);
+                    bool accepted = TryAutomaticOpenListAuthorization(location, options, token);
+                    if (!accepted && !automaticOnly)
+                        accepted = prompt != null ? prompt(location, options, token) : legacy != null && legacy(location, options);
                     token.ThrowIfCancellationRequested();
                     if (accepted)
                         SaveSharedOpenListAuthorization(options);
-                    else if (prompt != null)
+                    else if (!automaticOnly && prompt != null)
                         SaveOpenListFallback(location, options, "5 分钟内未完成授权，或已选择改用 WebDAV。");
                     flight.TrySetResult(accepted);
                 }
@@ -230,7 +228,12 @@ namespace Backup.Desktop
                 {
                     try
                     {
-                        if (prompt != null && !token.IsCancellationRequested)
+                        if (automaticOnly && !token.IsCancellationRequested)
+                        {
+                            RuntimeDiagnostics.Record("Backup.Desktop/OpenListFallback.cs:AutomaticAuthorization", error);
+                            flight.TrySetResult(false);
+                        }
+                        else if (prompt != null && !token.IsCancellationRequested)
                         {
                             SaveOpenListFallback(location, options, "重新授权未完成：" + error.Message);
                             flight.TrySetResult(false);
