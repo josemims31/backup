@@ -125,6 +125,15 @@ namespace Backup.Core
                 });
         }
 
+        internal int ChangeStamp
+        {
+            get
+            {
+                lock (gate)
+                    return database.ChangeStamp;
+            }
+        }
+
         internal InventoryFolderRecord ReadInventory(string id, string folder)
         {
             lock (gate)
@@ -261,6 +270,15 @@ namespace Backup.Core
             {
                 lock (gate)
                     return ((long)database.ChangeStamp << 32) ^ replacementEpoch;
+            }
+        }
+
+        public long InventoryChangeStamp
+        {
+            get
+            {
+                lock (gate)
+                    return ((long)runtimeCache.ChangeStamp << 32) ^ replacementEpoch;
             }
         }
 

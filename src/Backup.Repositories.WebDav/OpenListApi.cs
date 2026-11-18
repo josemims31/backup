@@ -664,6 +664,8 @@ namespace Backup.Core
                         throw new IOException("OpenList 连接失败或查询超时（" + (network == null ? error.Message : network.Status.ToString()) + "，未取得 HTTP/code/state）。", error);
                     }
 
+                    if (error.Code == 429 && endpoint == "auth/login")
+                        throw;
                     if (error.Code == 401 || error.Code == 403)
                     {
                         var failure = OpenListHttpAuthorizationFailure(error.Code);
@@ -683,7 +685,35 @@ namespace Backup.Core
             }
         }
 
-        private bool DetectOpenList()
+        private static bool IsTemporaryOpenListConnectionError(Exception error)
+        {
+            for (Exception cause = error; cause != null; cause = cause.InnerException)
+            {
+                var api = cause as OpenListApiException;
+                var dav = cause as DavException;
+                int code = api != null ? api.Code : dav != null ? dav.Code : 0;
+                if (code == 408 || code >= 500 && code < 600)
+                    return true;
+                var network = cause as WebException;
+                if (network != null)
+                    switch (network.Status)
+                    {
+                        case WebExceptionStatus.Timeout:
+                        case WebExceptionStatus.ConnectFailure:
+                        case WebExceptionStatus.ConnectionClosed:
+                        case WebExceptionStatus.ReceiveFailure:
+                        case WebExceptionStatus.SendFailure:
+                        case WebExceptionStatus.KeepAliveFailure:
+                        case WebExceptionStatus.NameResolutionFailure:
+                        case WebExceptionStatus.ProxyNameResolutionFailure:
+                        case WebExceptionStatus.PipelineFailure:
+                            return true;
+                    }
+            }
+            return false;
+        }
+
+        private bool DetectOpenList(bool reportTemporaryFailure = false)
         {
             lock (openListGate)
             {
@@ -709,9 +739,11 @@ namespace Backup.Core
                 {
                     throw;
                 }
-                catch (IOException)
+                catch (IOException error)
                 {
                     OperationCancellation.ThrowIfCancellationRequested();
+                    if (reportTemporaryFailure && IsTemporaryOpenListConnectionError(error))
+                        throw;
                     openListDetected = true;
                     return false;
                 }
@@ -821,10 +853,22 @@ namespace Backup.Core
             using (var driver = new WebDavDestination("authorization", location, options))
             {
                 driver.OperationCancellation = cancellation;
-                if (!driver.DetectOpenList())
-                    return false;
-                driver.EnsureOpenListAuthorization(otp);
-                return true;
+                bool knownAccount = !string.IsNullOrEmpty(options.OpenListApiBase) &&
+                    options.OpenListApiBase == OpenListBaseFor(driver.root) && options.OpenListUsername == options.Username;
+                try
+                {
+                    if (!driver.DetectOpenList(knownAccount))
+                        return false;
+                    driver.EnsureOpenListAuthorization(otp);
+                    return true;
+                }
+                catch (IOException error)
+                {
+                    cancellation.ThrowIfCancellationRequested();
+                    if (knownAccount && IsTemporaryOpenListConnectionError(error))
+                        throw new OpenListTemporaryAuthorizationException(error);
+                    throw;
+                }
             }
         }
     }

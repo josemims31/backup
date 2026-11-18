@@ -33,4 +33,11 @@ namespace Backup.Core
         {
         }
     }
+
+    public sealed class OpenListTemporaryAuthorizationException : IOException
+    {
+        public OpenListTemporaryAuthorizationException(Exception error) : base(error.Message, error)
+        {
+        }
+    }
 }

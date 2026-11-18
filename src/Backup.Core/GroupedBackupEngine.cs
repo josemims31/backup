@@ -491,8 +491,14 @@ namespace Backup.Core
         public IList<IntegrityFinding> CheckIntegrity(long archiveId, System.Threading.CancellationToken cancellation = default(System.Threading.CancellationToken), bool includeHistorical = false)
         {
             var definitions = catalog.LoadTopology().Destinations.ToDictionary(x => x.Id);
+            var copies = includeHistorical ? catalog.GetCopies(archiveId) : catalog.GetVerifiableCopies(archiveId);
+            return CheckIntegrity(archiveId, copies, definitions, cancellation);
+        }
+
+        public IList<IntegrityFinding> CheckIntegrity(long archiveId, IEnumerable<StoredCopy> copies, IDictionary<string, DestinationDefinition> definitions, System.Threading.CancellationToken cancellation)
+        {
             var all = new List<IntegrityFinding>();
-            foreach (var group in (includeHistorical ? catalog.GetCopies(archiveId) : catalog.GetVerifiableCopies(archiveId)).GroupBy(x => x.GroupId))
+            foreach (var group in copies.GroupBy(x => x.GroupId))
             {
                 cancellation.ThrowIfCancellationRequested();
                 var findings = new List<IntegrityFinding>();

@@ -38,7 +38,7 @@ namespace Backup.Desktop
             return BuildWarehouseNodes(id, folder, ListWarehouseEntries(id, folder, OperationCancellation));
         }
 
-        private IList<StorageEntry> ListWarehouseEntries(string id, string folder, System.Threading.CancellationToken cancellation, bool fresh = false)
+        private IList<StorageEntry> ListWarehouseEntries(string id, string folder, System.Threading.CancellationToken cancellation, bool fresh = false, DestinationDefinition destination = null)
         {
 #if UI_TEST
             if (TestWarehouseRead != null)
@@ -47,7 +47,7 @@ namespace Backup.Desktop
             if (!cancellation.CanBeCanceled)
                 cancellation = OperationCancellation;
             cancellation.ThrowIfCancellationRequested();
-            var destination = Catalog.LoadTopology().Destinations.Single(d => d.Id == id);
+            destination = destination ?? Catalog.LoadTopology().Destinations.Single(d => d.Id == id);
             RepositoryModules.CheckDirectory(destination.Protocol, destination.Location, folder);
             return RepositoryConnection(destination).Session.ListEntriesAt(folder, cancellation, fresh);
         }

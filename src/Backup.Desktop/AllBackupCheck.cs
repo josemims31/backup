@@ -14,9 +14,10 @@ namespace Backup.Desktop
         public List<string> TaskIds;
         internal HashSet<string> ArchiveTasks;
         internal HashSet<long> ObsoleteIds = new HashSet<long>();
+        internal readonly List<string> UnresolvedTaskPolicies = new List<string>();
         internal Dictionary<string, List<string>> Directories = new Dictionary<string, List<string>>();
         internal string TaskScope, Topology;
-        internal long CatalogStamp, RecoveryRevision;
+        internal long CatalogStamp, InventoryStamp, RecoveryRevision;
         internal bool Completed;
         public CleanupResult Cleanup;
         public List<string> Errors = new List<string>();
@@ -60,10 +61,12 @@ namespace Backup.Desktop
 
         private readonly BackupCatalog catalog;
         private readonly DestinationDefinition destination;
-        private readonly Dictionary<string, InventoryFolderRecord> folders;
+        private readonly IDictionary<string, WarehouseDirectoryRead> folders;
         private Dictionary<string, List<StorageEntry>> entries;
+        private IDictionary<string, string> locations;
+        private IList<KeyValuePair<string, WarehouseDirectoryRead>> failedFolders;
         private readonly bool filesystem;
-        internal InventoryMetadataDestination(BackupCatalog value, DestinationDefinition target, Dictionary<string, InventoryFolderRecord> records)
+        internal InventoryMetadataDestination(BackupCatalog value, DestinationDefinition target, IDictionary<string, WarehouseDirectoryRead> records)
         {
             catalog = value;
             destination = target;
@@ -72,9 +75,15 @@ namespace Backup.Desktop
             filesystem = RepositoryModules.IsFileSystem(target.Protocol);
         }
 
-        private string Key(string path)
+        internal static string FolderKey(string path, bool filesystem)
         {
             return filesystem ? StoragePath.NormalizeRoot(path).ToUpperInvariant() : path.TrimEnd('/');
+        }
+
+        internal static bool IsInDirectory(string pathKey, string directoryKey, bool filesystem)
+        {
+            char separator = filesystem ? '\\' : '/';
+            return pathKey == directoryKey || pathKey.StartsWith(directoryKey.TrimEnd(separator) + separator, StringComparison.Ordinal);
         }
 
         public RemoteObjectInfo Stat(string name)
@@ -85,8 +94,8 @@ namespace Backup.Desktop
             if (entries == null)
             {
                 entries = new Dictionary<string, List<StorageEntry>>(filesystem ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
-                foreach (var record in folders.Values.Where(r => string.IsNullOrEmpty(r.Error)))
-                    foreach (var entry in JsonSettings.Decode(record.Json, new List<StorageEntry>()).Where(e => !e.Directory))
+                foreach (var read in folders.Values.Where(read => read.Entries != null))
+                    foreach (var entry in read.Entries.Where(e => !e.Directory))
                     {
                         List<StorageEntry> found;
                         if (!entries.TryGetValue(entry.Name, out found))
@@ -102,8 +111,13 @@ namespace Backup.Desktop
             List<StorageEntry> choices;
             if (entries.TryGetValue(name, out choices))
             {
-                var expected = catalog.FindStoredObject(name);
-                var item = choices.FirstOrDefault(e => expected != null && e.Size == expected.Size) ?? choices[0];
+                var item = choices[0];
+                if (choices.Count > 1)
+                {
+                    var expected = catalog.FindStoredObject(name);
+                    if (expected != null)
+                        item = choices.FirstOrDefault(e => e.Size == expected.Size) ?? item;
+                }
                 if (item.Size < 0)
                     throw new IOException("仓库没有提供有效文件大小。");
                 return new RemoteObjectInfo
@@ -114,11 +128,22 @@ namespace Backup.Desktop
                 };
             }
 
-            string directory = ObjectStoragePath.Absolute(destination, catalog.ObjectStorageDirectory(Id, BackupObjectNaming.ObjectName(name) ?? name) ?? "");
-            InventoryFolderRecord failed;
-            if (folders.TryGetValue(Key(directory), out failed) && !string.IsNullOrEmpty(failed.Error))
-                throw new IOException(failed.Error);
-            if (!folders.TryGetValue(Key(destination.Location), out failed) || !string.IsNullOrEmpty(failed.Error))
+            if (locations == null)
+                locations = catalog.ObjectStorageDirectories(Id);
+            string relative;
+            locations.TryGetValue(BackupObjectNaming.ObjectName(name) ?? name, out relative);
+            string directory = FolderKey(ObjectStoragePath.Absolute(destination, relative ?? ""), filesystem);
+            WarehouseDirectoryRead observed;
+            bool readable = folders.TryGetValue(directory, out observed) && observed.Entries != null;
+            if (!readable)
+            {
+                if (failedFolders == null)
+                    failedFolders = folders.Where(pair => pair.Value.Entries == null).ToList();
+                foreach (var failed in failedFolders)
+                    if (IsInDirectory(directory, failed.Key, filesystem))
+                        throw new IOException(failed.Value.Record.Error);
+            }
+            if (!folders.TryGetValue(FolderKey(destination.Location, filesystem), out observed) || observed.Entries == null)
                 throw new IOException("仓库暂不可访问，保留上次记录。");
             return new RemoteObjectInfo
             {
@@ -176,7 +201,7 @@ namespace Backup.Desktop
             };
         }
 
-        private WarehouseDirectoryRead ReadWarehouseDirectory(string id, string folder, System.Threading.CancellationToken cancellation, bool checkIntegrity, string checkedUtc = null, bool missingDirectoryIsEmpty = false)
+        private WarehouseDirectoryRead ReadWarehouseDirectory(string id, string folder, System.Threading.CancellationToken cancellation, bool checkIntegrity, string checkedUtc = null, bool missingDirectoryIsEmpty = false, DestinationDefinition definition = null)
         {
             var ticket = repositoryRuntime.BeginRead(id, folder);
             try
@@ -184,7 +209,7 @@ namespace Backup.Desktop
                 IList<StorageEntry> entries;
                 try
                 {
-                    entries = ListWarehouseEntries(id, folder, cancellation, checkIntegrity || checkedUtc != null);
+                    entries = ListWarehouseEntries(id, folder, cancellation, checkIntegrity || checkedUtc != null, definition);
 #if UI_TEST
                     if (TestWarehouseListingResult != null)
                         TestWarehouseListingResult(id, folder, entries);
@@ -209,7 +234,7 @@ namespace Backup.Desktop
                 }
 
                 cancellation.ThrowIfCancellationRequested();
-                var definition = Catalog.LoadTopology().Destinations.Single(d => d.Id == id);
+                definition = definition ?? Catalog.LoadTopology().Destinations.Single(d => d.Id == id);
                 Catalog.RememberListedObjectDirectories(id, ObjectStoragePath.Relative(definition, folder), entries);
                 long version;
                 InventoryFolderRecord record;
@@ -286,10 +311,11 @@ namespace Backup.Desktop
                 .ToList();
             result.ObsoleteIds.UnionWith(Catalog.ObsoleteOwnedArchiveIds(archiveTasks));
             var interrupted = Catalog.InterruptedArchives(archiveTasks);
-            var knownCopies = taskIds == null ? null : archives.SelectMany(archive => Catalog.GetCopies(archive.ArchiveId)).ToList();
+            var knownCopies = taskIds == null ? null : archives.SelectMany(archive => Catalog.GetCopies(archive.ArchiveId)).ToLookup(copy => copy.DestinationId);
             var members = taskIds == null 
                 ? null 
-                : new HashSet<string>(knownCopies.Concat(interrupted.SelectMany(archive => Catalog.InterruptedCheckCopies(archive.ArchiveId))).Select(copy => copy.DestinationId));
+                : new HashSet<string>(knownCopies.Select(copies => copies.Key)
+                    .Concat(interrupted.SelectMany(archive => Catalog.InterruptedCheckCopies(archive.ArchiveId)).Select(copy => copy.DestinationId)));
             var temporaryDestinations = new HashSet<string>(Catalog.PendingUploadStages().Where(item => Catalog.CanInspectUploadTemporaries(item.ArchiveId) &&
                 (archiveTasks == null ||
                 archiveTasks.Contains(Catalog.GetArchive(item.ArchiveId)
@@ -301,7 +327,7 @@ namespace Backup.Desktop
                 foreach (var task in WorkspaceMigration.Load(Catalog).Tasks.Where(task => taskIds.Contains(task.Id)))
                     foreach (string root in task.TargetIds.Where(root => topology.Groups.Any(group => group.Id == root)))
                         members.UnionWith(topology.ResolveDestinations(root, false));
-            var snapshots = new Dictionary<string, Dictionary<string, InventoryFolderRecord>>();
+            var snapshots = new Dictionary<string, Dictionary<string, WarehouseDirectoryRead>>();
             string stamp = DateTime.UtcNow.ToString("o");
             var resultsGate = new object();
             var reportsGate = new object();
@@ -317,14 +343,22 @@ namespace Backup.Desktop
                     int checkedFolders = 0, checkedEntries = 0;
                     var errors = new List<string>();
                     bool local = RepositoryModules.IsFileSystem(d.Protocol);
-                    Func<string, string> key = path => local ? StoragePath.NormalizeRoot(path).ToUpperInvariant() : path.TrimEnd('/');
-                    var folders = new Dictionary<string, InventoryFolderRecord>();
+                    Func<string, string> key = path => InventoryMetadataDestination.FolderKey(path, local);
+                    var folders = new Dictionary<string, WarehouseDirectoryRead>();
                     lock (resultsGate)
                         snapshots[d.Id] = folders;
                     var queue = new Stack<Tuple<string, int>>();
-                    if (taskIds != null)
-                        foreach (string folder in knownCopies.Where(c => c.DestinationId == d.Id).Select(c => ObjectStoragePath.Absolute(d, Catalog.ObjectStorageDirectory(d.Id, c.Object.Name) ?? "")).Distinct())
+                    if (knownCopies != null && knownCopies.Contains(d.Id))
+                    {
+                        var locations = Catalog.ObjectStorageDirectories(d.Id);
+                        foreach (string folder in knownCopies[d.Id].Select(copy =>
+                        {
+                            string directory;
+                            locations.TryGetValue(copy.Object.Name, out directory);
+                            return ObjectStoragePath.Absolute(d, directory ?? "");
+                        }).Distinct())
                             queue.Push(Tuple.Create(folder, 0));
+                    }
                     if (!SameFolder(d.Location, ObjectDirectory(d), local))
                         queue.Push(Tuple.Create(ObjectDirectory(d), 0));
                     queue.Push(Tuple.Create(d.Location, 0));
@@ -337,15 +371,7 @@ namespace Backup.Desktop
                         var next = queue.Pop();
                         if (folders.ContainsKey(key(next.Item1)))
                             continue;
-                        var cached = Catalog.GetInventoryFolder(d.Id, next.Item1);
-                        var record = new InventoryFolderRecord
-                        {
-                            DestinationId = d.Id,
-                            Folder = next.Item1,
-                            CheckedUtc = stamp,
-                            Json = cached == null ? "[]" : cached.Json,
-                            Error = ""
-                        };
+                        WarehouseDirectoryRead read;
                         try
                         {
                             if (next.Item2 > 64)
@@ -353,17 +379,17 @@ namespace Backup.Desktop
                             if (report != null)
                                 lock (reportsGate)
                                     report("正在检查仓库目录：" + next.Item1);
-                            var read = ReadWarehouseDirectory(
+                            read = ReadWarehouseDirectory(
                                 d.Id,
                                 next.Item1,
                                 OperationCancellation,
                                 false,
                                 stamp,
                                 !SameFolder(next.Item1, d.Location, local) && folders.ContainsKey(key(d.Location)) &&
-                                string.IsNullOrEmpty(folders[key(d.Location)].Error)
+                                folders[key(d.Location)].Entries != null,
+                                d
                             );
                             var entries = read.Entries;
-                            record = read.Record;
                             checkedFolders++;
                             checkedEntries += entries.Count;
                             if (taskIds == null)
@@ -376,11 +402,14 @@ namespace Backup.Desktop
                             if (!(error is IOException) && !(error is UnauthorizedAccessException) && !(error is NotSupportedException))
                                 throw;
                             complete = false;
-                            record.Error = error.Message;
+                            read = new WarehouseDirectoryRead
+                            {
+                                Record = new InventoryFolderRecord { DestinationId = d.Id, Folder = next.Item1, CheckedUtc = stamp, Error = error.Message }
+                            };
                             errors.Add(next.Item1 + "：" + error.Message);
                         }
 
-                        folders[key(next.Item1)] = record;
+                        folders[key(next.Item1)] = read;
                     }
 
                     if (complete && taskIds == null)
@@ -411,7 +440,7 @@ namespace Backup.Desktop
                     InventoryMetadataDestination adapter;
                     if (!metadataAdapters.TryGetValue(d.Id, out adapter))
                     {
-                        adapter = new InventoryMetadataDestination(Catalog, d, snapshots.ContainsKey(d.Id) ? snapshots[d.Id] : new Dictionary<string, InventoryFolderRecord>());
+                        adapter = new InventoryMetadataDestination(Catalog, d, snapshots.ContainsKey(d.Id) ? snapshots[d.Id] : new Dictionary<string, WarehouseDirectoryRead>());
                         adapter.ConfirmedUploads = result.Findings.Where(f => f.UploadConfirmation && f.Destination == d.Id && f.Status == "present-size-matched").GroupBy(f => f.Name, StringComparer.Ordinal)
                             .ToDictionary(g => g.Key, g => new RemoteObjectInfo {
                             Name = g.Key,
@@ -427,24 +456,25 @@ namespace Backup.Desktop
                 );
             result.Findings.AddRange(CheckPendingUploads(archiveTasks, false, result.ObsoleteIds, true, formalOnly));
             var engine = new GroupedBackupEngine(Catalog, adapters, Path.Combine(BaseDirectory, "7za.dll"));
+            var definitions = topology.Destinations.ToDictionary(d => d.Id);
             foreach (var archive in archives.Where(item => !result.ObsoleteIds.Contains(item.ArchiveId)))
             {
                 if (report != null)
                     report("正在比对文件列表：" + archive.ArchiveName);
-                result.Findings.AddRange(engine.CheckIntegrity(archive.ArchiveId, OperationCancellation, true));
+                result.Findings.AddRange(engine.CheckIntegrity(archive.ArchiveId, Catalog.GetCopies(archive.ArchiveId), definitions, OperationCancellation));
             }
 
             result.Findings.AddRange(CheckInterruptedBackups(adapters, archiveTasks, report));
             if (!formalOnly)
                 result.Findings.AddRange(CheckOwnedTemporaryFiles(adapters, archiveTasks, result.ObsoleteIds));
-            CompleteIntegrityReview(result, snapshots, false);
+            CompleteIntegrityReview(result, snapshots, topology, false);
             if (taskIds == null && result.Errors.Count == 0 &&
                 !result.Findings.Any(f => f.Status.StartsWith("unavailable", StringComparison.Ordinal) || f.Status == "confirmation-pending"))
                 foreach (var destination in topology.Destinations)
                     Catalog.AcceptInspectedStorageGrowth(destination.Id, result.Findings);
             // Check only recorded objects against the directory inventory. Version
             // contents and unreferenced-package collection belong to repair/compaction.
-            ReviewLatestTaskTargets(result);
+            ReviewLatestTaskTargets(result, topology);
             result.CatalogStamp = Catalog.DataChangeStamp;
             result.RecoveryRevision = Catalog.RecoveryRevision;
             return result;
@@ -493,10 +523,12 @@ namespace Backup.Desktop
                     " 个外部文件。" +
                     (result.Errors.Count == 0 ? "" : "\n部分目录保留上次清单：" +
                     string.Join("；", result.Errors));
+                if (result.UnresolvedTaskPolicies.Count > 0)
+                    text += "\n以下任务的最新版本副本引用未核实，请运行完整性修复：" + string.Join("、", result.UnresolvedTaskPolicies);
                 string message = text + "\n按名称和大小核对；仅修正本地登记状态，未修改仓库文件。";
                 var state = result.Findings.Any(f => f.RequiresManualRepairConfirmation) 
                     ? OperationState.Failed 
-                    : result.Errors.Count > 0 ||
+                    : result.Errors.Count > 0 || result.UnresolvedTaskPolicies.Count > 0 ||
                     result.Findings.Any(f => f.Status.StartsWith("unavailable") ||
                     f.Status == "confirmation-pending") 
                     ? OperationState.Attention 

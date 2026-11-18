@@ -7,7 +7,8 @@ namespace Backup.Desktop
 {
     public sealed partial class DesktopBackend
     {
-        private readonly HashSet<string> failedAutomaticOpenListAuthorizations = new HashSet<string>(StringComparer.Ordinal);
+        internal static int AutomaticOpenListRetryMilliseconds = 30000;
+        private readonly Dictionary<string, DateTime> automaticOpenListRetryTimes = new Dictionary<string, DateTime>(StringComparer.Ordinal);
 
         private bool UseOpenListWebDavFallback(string location, RemoteConnectionOptions options)
         {
@@ -25,8 +26,9 @@ namespace Backup.Desktop
                 return false;
 
             string key = OpenListSessionKey(service, options.Username + "\0" + options.OpenListToken);
+            DateTime blockedUntil;
             lock (authorizationFlightsGate)
-                if (failedAutomaticOpenListAuthorizations.Contains(key))
+                if (automaticOpenListRetryTimes.TryGetValue(key, out blockedUntil) && DateTime.UtcNow < blockedUntil)
                     return false;
 
             var candidate = new RemoteConnectionOptions
@@ -42,6 +44,7 @@ namespace Backup.Desktop
                 OpenListToken = options.OpenListToken
             };
             bool accepted = false;
+            DateTime retryAfter = DateTime.MaxValue;
             try
             {
                 try
@@ -68,8 +71,15 @@ namespace Backup.Desktop
                 accepted = true;
                 return true;
             }
+            catch (OpenListTemporaryAuthorizationException)
+            {
+                retryAfter = DateTime.UtcNow.AddMilliseconds(AutomaticOpenListRetryMilliseconds);
+                throw;
+            }
             catch (OpenListAuthorizationException error)
             {
+                if (error is OpenListLoginThrottledException)
+                    retryAfter = DateTime.UtcNow.AddMinutes(5);
                 if (error.RequiresTwoFactor)
                 {
                     options.OpenListRequiresTwoFactor = true;
@@ -82,9 +92,13 @@ namespace Backup.Desktop
             }
             finally
             {
-                if (!accepted && !token.IsCancellationRequested)
-                    lock (authorizationFlightsGate)
-                        failedAutomaticOpenListAuthorizations.Add(key);
+                lock (authorizationFlightsGate)
+                {
+                    if (accepted)
+                        automaticOpenListRetryTimes.Remove(key);
+                    else if (!token.IsCancellationRequested)
+                        automaticOpenListRetryTimes[key] = retryAfter;
+                }
             }
         }
     }

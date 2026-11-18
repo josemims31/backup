@@ -9,6 +9,6 @@ namespace Backup
     {
         // Change only this value for the next release; shared by the main app,
         // updater and built-in repository modules at compile time.
-        internal const string Value = "1.1.10.0";
+        internal const string Value = "1.1.11.0";
     }
 }

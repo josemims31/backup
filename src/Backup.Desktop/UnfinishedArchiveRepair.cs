@@ -28,7 +28,7 @@ namespace Backup.Desktop
                 using (var cache = new MemoryReadCache(Math.Max(ArchiveObjectIO.MaximumVolumeBytes, MemoryLimitBytes / 3), TransferMemory))
                     foreach (var historical in historicalNodes)
                     {
-                        var history = ReadNodeDatabase(historical, cache: cache);
+                        var history = ReadMaintenanceNodeDatabase(historical, cache);
                         references.UnionWith(history.ArchiveIds);
                     }
 

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using Backup.Core;
 
@@ -47,7 +48,11 @@ namespace Backup.Desktop
                 }
                 // Older catalogs can reuse their working-file metadata. This reads
                 // neither a version database nor archive content during a check.
+                if (Catalog.WorkingNodeBasis(node.TaskId) != node.Id + ":" + node.Revision)
+                    return null;
                 files = Catalog.CaptureNode(node.TaskId, node.Id, node.CreatedUtc);
+                if (files.Files.Count == 0)
+                    return null;
             }
             // Unchanged files in the same packages share a policy calculation.
             var primaryOnly = new HashSet<long>();
@@ -105,10 +110,37 @@ namespace Backup.Desktop
             return !roots.Except(recorded, StringComparer.Ordinal).Any();
         }
 
-        private Dictionary<long, List<string>> LatestArchiveTargets(WorkspaceDefinition workspace, ISet<string> taskIds = null)
+        private void RememberPolicyReferencesOnTargetAddition(WorkspaceDefinition workspace)
+        {
+            var previous = JsonSettings.Decode(Catalog.GetSetting("workspace_v3"), new WorkspaceDefinition()).Tasks.ToDictionary(task => task.Id);
+            foreach (var task in workspace.Tasks.Where(task => !task.Deleted && !task.PendingTargetReplacement))
+            {
+                BackupTaskDefinition before;
+                if (!previous.TryGetValue(task.Id, out before) || !task.TargetIds.Except(before.TargetIds, StringComparer.Ordinal).Any())
+                    continue;
+                var latest = Catalog.GetNodes(task.Id).FirstOrDefault();
+                if (latest == null || NodePolicyReferences(latest) != null)
+                    continue;
+                try
+                {
+                    var files = ReadCachedNodeDatabase(latest);
+                    if (files != null)
+                        NodePolicyReferences(latest, files);
+                }
+                catch (Exception error)
+                {
+                    if (!(error is IOException) && !(error is UnauthorizedAccessException))
+                        throw;
+                    RuntimeDiagnostics.Record("Backup.Desktop/TaskTargetPolicy.cs:RememberPolicyReferencesOnTargetAddition", error);
+                }
+            }
+        }
+
+        private Dictionary<long, List<string>> LatestArchiveTargets(WorkspaceDefinition workspace, ISet<string> taskIds,
+            IDictionary<long, ISet<string>> recorded = null, Action<BackupTaskDefinition> unresolved = null, Func<BackupNode, TaskPolicyReferences> resolve = null)
         {
             var result = new Dictionary<long, List<string>>();
-            var recorded = Catalog.RecordedArchivePolicyRoots();
+            recorded = recorded ?? Catalog.RecordedArchivePolicyRoots();
             foreach (var task in workspace.Tasks.Where(task => !task.Deleted && !task.PendingTargetReplacement && task.TargetIds.Count > 0 &&
                 (taskIds == null || taskIds.Contains(task.Id))))
             {
@@ -116,6 +148,10 @@ namespace Backup.Desktop
                 if (latest == null)
                     continue;
                 var references = NodePolicyReferences(latest);
+                if (references == null && resolve != null)
+                    references = resolve(latest);
+                if (references == null && unresolved != null)
+                    unresolved(task);
                 var ids = references == null ? new HashSet<long> { latest.ArchiveId } : references.Archives;
                 foreach (long id in ids)
                 {
@@ -139,13 +175,14 @@ namespace Backup.Desktop
             return result;
         }
 
-        private void ReviewLatestTaskTargets(AllBackupCheckResult review)
+        private void ReviewLatestTaskTargets(AllBackupCheckResult review, StorageTopology topology, WorkspaceDefinition workspace = null,
+            Func<BackupNode, TaskPolicyReferences> resolve = null)
         {
-            var latestTargets = LatestArchiveTargets(WorkspaceMigration.Load(Catalog), review.TaskIds == null ? null : new HashSet<string>(review.TaskIds));
-            if (latestTargets.Count == 0)
-                return;
             var recorded = Catalog.RecordedArchivePolicyRoots(review.TaskIds != null && review.TaskIds.Count == 1 ? review.TaskIds[0] : null);
-            var topology = Catalog.LoadTopology();
+            var scope = review.TaskIds == null ? null : new HashSet<string>(review.TaskIds);
+            review.UnresolvedTaskPolicies.Clear();
+            var latestTargets = LatestArchiveTargets(workspace ?? WorkspaceMigration.Load(Catalog), scope, recorded,
+                task => review.UnresolvedTaskPolicies.Add(task.Name), resolve);
             foreach (var pair in latestTargets)
             {
                 ISet<string> roots;
@@ -158,7 +195,8 @@ namespace Backup.Desktop
                     archive.Status != "complete" && archive.Status != "repair-required" && archive.Status != "redundancy-shortfall" ||
                     !Catalog.HasCompleteArchiveManifest(pair.Key) || Catalog.CoversArchivePolicy(pair.Key, topology.Scope(pair.Value), pair.Value.Count))
                     continue;
-                Catalog.RecordInspectedArchiveProblem(pair.Key);
+                if (archive.Status != "repair-required")
+                    Catalog.RecordInspectedArchiveProblem(pair.Key);
                 review.Findings.RemoveAll(item => item.ArchiveId == pair.Key && item.ArchiveLevel);
                 review.Findings.Add(new IntegrityFinding {
                     ArchiveId = pair.Key,

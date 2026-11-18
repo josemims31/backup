@@ -59,6 +59,7 @@ namespace Backup.Desktop
         public void SaveWorkspaceDefinition(WorkspaceDefinition workspace)
         {
             WorkspaceMigration.Validate(workspace, Catalog.LoadTopology());
+            RememberPolicyReferencesOnTargetAddition(workspace);
             foreach (var task in workspace.Tasks)
                 Catalog.EnsureTaskTag(task.Id);
             Catalog.SetSetting("workspace_v3", JsonSettings.Encode(workspace));

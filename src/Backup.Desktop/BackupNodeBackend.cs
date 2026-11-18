@@ -491,6 +491,18 @@ namespace Backup.Desktop
             return string.Join("\n", nodes.Select(HistoricalNodeKey).OrderBy(key => key, StringComparer.Ordinal));
         }
 
+        private NodeFileDatabase ReadMaintenanceNodeDatabase(BackupNode node, MemoryReadCache cache = null, Action<string> report = null)
+        {
+            Func<NodeFileDatabase> read = () =>
+            {
+                if (report != null)
+                    report("正在读取备份版本数据库并核对引用：" + node.Id);
+                return ReadNodeDatabase(node, cache: cache);
+            };
+            var maintenance = maintenanceSearch.Value;
+            return maintenance == null ? read() : maintenance.ReadNode(node, Math.Min(16L * 1024 * 1024, MemoryLimitBytes / 32), read);
+        }
+
         private bool InspectNodeReferences(ISet<string> taskIds, IList<string> errors, Action<string> report, Action<BackupNode, NodeFileDatabase> inspected = null)
         {
             lock (fileReplicaPeerGate)
@@ -513,9 +525,7 @@ namespace Backup.Desktop
                     OperationCancellation.ThrowIfCancellationRequested();
                     try
                     {
-                        if (report != null)
-                            report("正在读取备份版本数据库并核对引用：" + node.Id);
-                        var files = ReadNodeDatabase(node, cache: cache);
+                        var files = ReadMaintenanceNodeDatabase(node, cache, report);
                         foreach (var file in files.FileCopies)
                         {
                             ArchiveSummary archive;

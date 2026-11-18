@@ -447,6 +447,34 @@ namespace Backup.Desktop
             }
         }
 
+        private static NodeFile CopyRepackFile(NodeFile file)
+        {
+            return new NodeFile
+            {
+                ArchiveId = file.ArchiveId,
+                Size = file.Size,
+                Modified = file.Modified,
+                Path = file.Path,
+                SourcePath = file.SourcePath,
+                EntryPath = file.EntryPath,
+                ContentPath = file.ContentPath,
+                Replicas = file.Replicas == null ? null : file.Replicas.Select(CopyRepackFile).ToList()
+            };
+        }
+
+        private NodeFileDatabase ReadNodeForRepack(BackupNode node)
+        {
+            var maintenance = maintenanceSearch.Value;
+            var inspected = maintenance == null ? null : maintenance.ReadNode(node, 0, null);
+            if (inspected == null)
+                return ReadNodeDatabase(node);
+            RequireRegisteredNode(node);
+            // Repack updates references in place; keep the verified read snapshot intact.
+            var copy = new NodeFileDatabase { Id = inspected.Id, CreatedUtc = inspected.CreatedUtc, Revision = inspected.Revision };
+            copy.Files.AddRange(inspected.Files.Select(CopyRepackFile));
+            return copy;
+        }
+
         private void RepackNodeBatch(
             IList<RepackNode> batch,
             RepackPolicy policy,
@@ -468,7 +496,7 @@ namespace Backup.Desktop
                 var pending = new List<Tuple<RepackNode, NodeFileDatabase, byte[], SourceItem>>();
                 foreach (var state in batch)
                 {
-                    var db = ReadNodeDatabase(state.Node);
+                    var db = ReadNodeForRepack(state.Node);
                     bool rewritten = false;
                     foreach (var file in db.FileCopies)
                     {
@@ -520,7 +548,10 @@ namespace Backup.Desktop
                         result.Versions++;
                         CacheNode(node, item.Item3);
                         if (Catalog.GetNodes(node.TaskId).First().Id == node.Id)
+                        {
+                            NodePolicyReferences(node, db);
                             Catalog.LoadWorkingNode(node.TaskId, db);
+                        }
                     }
 
                     result.MergedDatabaseIds.UnionWith(oldIds);

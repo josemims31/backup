@@ -18,12 +18,13 @@ namespace Backup.Desktop
             if (review == null || !review.Completed || !review.Directories.TryGetValue(destination.Id, out folders))
                 return null;
             var result = new Dictionary<string, IList<StorageEntry>>();
+            long stamp = Catalog.InventoryChangeStamp;
             foreach (string folder in folders)
             {
-                var record = Catalog.GetInventoryFolder(destination.Id, folder);
-                if (record == null || !string.IsNullOrEmpty(record.Error))
+                var read = ReadReviewDirectory(destination.Id, folder, stamp);
+                if (read == null || read.Entries == null)
                     return null;
-                result[ObjectStoragePath.Relative(destination, folder)] = JsonSettings.Decode(record.Json, new List<StorageEntry>());
+                result[ObjectStoragePath.Relative(destination, folder)] = read.Entries;
             }
 
             return result;
@@ -40,11 +41,6 @@ namespace Backup.Desktop
         private static string ReviewScope(IEnumerable<string> ids)
         {
             return ids == null ? "*" : string.Join("\n", ids.OrderBy(id => id, StringComparer.Ordinal));
-        }
-
-        private string ReviewTopology()
-        {
-            return JsonSettings.Encode(Catalog.LoadTopology());
         }
 
         private HashSet<string> IntegrityTaskIds(IEnumerable<string> ids)
@@ -76,10 +72,10 @@ namespace Backup.Desktop
             });
         }
 
-        private void CompleteIntegrityReview(AllBackupCheckResult review, IDictionary<string, Dictionary<string, InventoryFolderRecord>> snapshots, bool checkTaskTargets = true)
+        private void CompleteIntegrityReview(AllBackupCheckResult review, IDictionary<string, Dictionary<string, WarehouseDirectoryRead>> snapshots, StorageTopology topology, bool checkTaskTargets = true)
         {
             review.ArchiveTasks = IntegrityTaskIds(review.TaskIds);
-            review.Directories = snapshots.ToDictionary(pair => pair.Key, pair => pair.Value.Values.Select(value => value.Folder).Distinct().ToList());
+            review.Directories = snapshots.ToDictionary(pair => pair.Key, pair => pair.Value.Values.Select(value => value.Record.Folder).Distinct().ToList());
             var archives = Catalog.ListArchives(true).Where(item => !string.IsNullOrEmpty(item.ArchiveName)).ToDictionary(item => item.ArchiveName, StringComparer.OrdinalIgnoreCase);
             var indexed = new ReviewFindingIndex(review.Findings);
             var byId = archives.Values.ToDictionary(item => item.ArchiveId);
@@ -89,18 +85,17 @@ namespace Backup.Desktop
             var obsolete = (review.TaskIds == null || review.TaskIds.Contains("__catalog__")) 
                 ? new HashSet<long>(Catalog.UnregisterUnusedCatalogSnapshots(DatabaseBackupTargets(), true)) 
                 : new HashSet<long>();
-            foreach (var definition in Catalog.LoadTopology().Destinations)
+            foreach (var definition in topology.Destinations)
             {
-                Dictionary<string, InventoryFolderRecord> folders;
+                Dictionary<string, WarehouseDirectoryRead> folders;
                 if (!snapshots.TryGetValue(definition.Id, out folders))
                     continue;
                 bool local = RepositoryModules.IsFileSystem(definition.Protocol);
                 var known = Catalog.GetWarehouseObjects(definition.Id).ToDictionary(item => item.Name, local ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
-                var decoded = folders.Where(pair => string.IsNullOrEmpty(pair.Value.Error)).ToDictionary(pair => pair.Key, pair => JsonSettings.Decode(pair.Value.Json, new List<StorageEntry>()));
-                foreach (var pair in decoded)
-                    foreach (var entry in pair.Value)
+                foreach (var read in folders.Values.Where(read => read.Entries != null))
+                    foreach (var entry in read.Entries)
                     {
-                        var folder = folders[pair.Key];
+                        var folder = read.Record;
                         if (entry.Directory)
                             continue;
                         if (!BackupObjectNaming.IsManaged(entry.Name))
@@ -228,16 +223,16 @@ namespace Backup.Desktop
                     return locations.TryGetValue(value.Name, out directory) ? ObjectStoragePath.Absolute(definition, directory) : ObjectDirectory(definition);
                 }))
                 {
-                    InventoryFolderRecord objectFolder;
-                    string key = local ? StoragePath.NormalizeRoot(group.Key).ToUpperInvariant() : group.Key.TrimEnd('/');
-                    if (!folders.TryGetValue(key, out objectFolder) || !string.IsNullOrEmpty(objectFolder.Error))
+                    WarehouseDirectoryRead objectFolder;
+                    string key = InventoryMetadataDestination.FolderKey(group.Key, local);
+                    if (!folders.TryGetValue(key, out objectFolder) || objectFolder.Entries == null)
                         continue;
-                    var present = new HashSet<string>(decoded[key].Select(entry => entry.Name), local ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+                    var present = new HashSet<string>(objectFolder.Entries.Select(entry => entry.Name), local ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
                     foreach (var item in group.Where(value => !present.Contains(value.Name)))
                         indexed.Add(new IntegrityFinding {
                             ArchiveId = item.ArchiveId,
                             Destination = definition.Id,
-                            Folder = objectFolder.Folder,
+                            Folder = objectFolder.Record.Folder,
                             Name = item.Name,
                             ExpectedSize = item.Size,
                             ActualSize = -1,
@@ -352,11 +347,11 @@ namespace Backup.Desktop
             review.Findings.Clear();
             review.Findings.AddRange(indexed.Items);
             if (checkTaskTargets)
-                ReviewLatestTaskTargets(review);
+                ReviewLatestTaskTargets(review, topology);
             review.ManagedUnregistered = review.Findings.Count(item => item.RepairAction == "delete-orphan" || item.RepairAction == "register-copy");
             review.RegistrationAnomalies = review.Findings.Count(item => item.RepairAction == "remove-obsolete-registration" || item.RepairAction == "clear-absent-record");
             review.TaskScope = ReviewScope(review.TaskIds);
-            review.Topology = ReviewTopology();
+            review.Topology = JsonSettings.Encode(topology);
             review.CatalogStamp = Catalog.DataChangeStamp;
             review.RecoveryRevision = Catalog.RecoveryRevision;
             review.Completed = true;
@@ -426,24 +421,50 @@ namespace Backup.Desktop
             }
         }
 
-        private AllBackupCheckResult ReviewCommittedInventory(AllBackupCheckResult original)
+        private static WarehouseDirectoryRead DecodeDirectory(InventoryFolderRecord record, WarehouseDirectoryRead previous = null)
+        {
+            if (record == null)
+                return null;
+            var read = new WarehouseDirectoryRead { Record = record };
+            if (string.IsNullOrEmpty(record.Error))
+                read.Entries = previous != null && previous.Entries != null && previous.Record.Json == record.Json
+                    ? previous.Entries
+                    : JsonSettings.Decode(record.Json, new List<StorageEntry>());
+            return read;
+        }
+
+        private WarehouseDirectoryRead ReadReviewDirectory(string id, string folder, long stamp)
+        {
+            var maintenance = maintenanceSearch.Value;
+            return maintenance == null
+                ? DecodeDirectory(Catalog.GetInventoryFolder(id, folder))
+                : maintenance.ReadDirectory(id, folder, stamp, () => Catalog.GetInventoryFolder(id, folder));
+        }
+
+        private AllBackupCheckResult ReviewCommittedInventory(AllBackupCheckResult original, StorageTopology topology,
+            AllBackupCheckResult reuseWhenUnchanged = null, bool checkTaskTargets = true)
         {
             FlushRepositoryResults();
+            long stamp = Catalog.InventoryChangeStamp;
+            if (reuseWhenUnchanged != null && reuseWhenUnchanged.InventoryStamp == stamp && reuseWhenUnchanged.CatalogStamp == Catalog.DataChangeStamp)
+                return reuseWhenUnchanged;
             var scope = IntegrityTaskIds(original.TaskIds);
             var result = new AllBackupCheckResult
             {
-                TaskIds = original.TaskIds
+                TaskIds = original.TaskIds,
+                InventoryStamp = stamp
             };
             result.Errors.AddRange(original.Errors);
             result.ObsoleteIds.UnionWith(Catalog.ObsoleteOwnedArchiveIds(scope));
             result.ObsoleteIds.UnionWith(original.ObsoleteIds.Where(id => Catalog.GetArchive(id).Status != "cleaned" && !Catalog.ArchiveHasCurrentFiles(id)));
-            var snapshots = new Dictionary<string, Dictionary<string, InventoryFolderRecord>>();
+            var snapshots = new Dictionary<string, Dictionary<string, WarehouseDirectoryRead>>();
+            var definitions = topology.Destinations.ToDictionary(item => item.Id);
             foreach (var pair in original.Directories)
             {
-                var records = new Dictionary<string, InventoryFolderRecord>();
-                var definition = Catalog.LoadTopology().Destinations.FirstOrDefault(item => item.Id == pair.Key);
-                if (definition == null)
+                DestinationDefinition definition;
+                if (!definitions.TryGetValue(pair.Key, out definition))
                     continue;
+                var records = new Dictionary<string, WarehouseDirectoryRead>();
                 bool local = RepositoryModules.IsFileSystem(definition.Protocol);
                 var locations = Catalog.ObjectStorageDirectories(pair.Key);
                 var folders = new HashSet<string>(pair.Value);
@@ -456,20 +477,28 @@ namespace Backup.Desktop
 
                 foreach (string folder in folders)
                 {
-                    var record = Catalog.GetInventoryFolder(pair.Key, folder);
+                    var record = ReadReviewDirectory(pair.Key, folder, stamp);
                     if (record == null)
                         continue;
-                    records[local ? StoragePath.NormalizeRoot(folder).ToUpperInvariant() : folder.TrimEnd('/')] = record;
+                    records[InventoryMetadataDestination.FolderKey(folder, local)] = record;
                 }
+
+                // A previous listing below a newly failed directory is stale.
+                var failed = records.Where(folder => folder.Value.Entries == null).ToList();
+                if (failed.Count > 0)
+                    foreach (string key in records.Where(folder => folder.Value.Entries != null && failed.Any(parent =>
+                        InventoryMetadataDestination.IsInDirectory(folder.Key, parent.Key, local) &&
+                        string.CompareOrdinal(folder.Value.Record.CheckedUtc, parent.Value.Record.CheckedUtc) < 0)).Select(folder => folder.Key).ToList())
+                        records.Remove(key);
 
                 snapshots[pair.Key] = records;
             }
 
-            CompleteIntegrityReview(result, snapshots);
+            CompleteIntegrityReview(result, snapshots, topology, checkTaskTargets);
             return result;
         }
 
-        private AllBackupCheckResult ReviewLocalInventory(ISet<string> taskIds)
+        private AllBackupCheckResult ReviewLocalInventory(ISet<string> taskIds, StorageTopology topology)
         {
             if (taskIds == null)
                 Catalog.RefreshLocalBackupNodes();
@@ -480,7 +509,8 @@ namespace Backup.Desktop
             {
                 TaskIds = taskIds == null ? null : taskIds.ToList()
             };
-            foreach (var definition in Catalog.LoadTopology().Destinations)
+            long stamp = Catalog.InventoryChangeStamp;
+            foreach (var definition in topology.Destinations)
             {
                 bool local = RepositoryModules.IsFileSystem(definition.Protocol);
                 var folders = new HashSet<string>(local ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
@@ -491,10 +521,11 @@ namespace Backup.Desktop
                     string folder = BackupCatalog.InventoryFolderKey(pending.Pop());
                     if (!folders.Add(folder))
                         continue;
-                    var record = Catalog.GetInventoryFolder(definition.Id, folder);
-                    if (record == null)
+                    var read = ReadReviewDirectory(definition.Id, folder, stamp);
+                    if (read == null)
                         continue;
-                    foreach (var entry in JsonSettings.Decode(record.Json, new List<StorageEntry>()).Where(item => item.Directory))
+                    var entries = read.Entries ?? JsonSettings.Decode(read.Record.Json, new List<StorageEntry>());
+                    foreach (var entry in entries.Where(item => item.Directory))
                         pending.Push(entry.Location);
                 }
 
@@ -503,7 +534,7 @@ namespace Backup.Desktop
 
             // No directory enumeration: repair starts with persisted observations
             // and rechecks only the objects that those observations marked.
-            return ReviewCommittedInventory(review);
+            return ReviewCommittedInventory(review, topology, checkTaskTargets: false);
         }
 
         private RemoteObjectInfo RecheckReviewObject(IntegrityFinding finding, IDictionary<string, DestinationDefinition> definitions, bool currentLocation = false)
@@ -748,16 +779,34 @@ namespace Backup.Desktop
                 TrimRepairQueue(pendingRepairs, taskIds);
                 if (pendingRepairs.Count != pendingBefore)
                     SaveRepairQueue(pendingRepairs);
+                var topology = Catalog.LoadTopology();
                 var review = lastIntegrityReview;
-                if (review == null || !review.Completed || review.TaskScope != ReviewScope(taskIds) || review.Topology != ReviewTopology())
-                    review = ReviewLocalInventory(taskIds);
+                if (review == null || !review.Completed || review.TaskScope != ReviewScope(taskIds) || review.Topology != JsonSettings.Encode(topology))
+                    review = ReviewLocalInventory(taskIds, topology);
                 else if (taskDeletesAttempted || review.RecoveryRevision != Catalog.RecoveryRevision)
-                    review = ReviewCommittedInventory(review);
-                ReviewLatestTaskTargets(review);
+                    review = ReviewCommittedInventory(review, topology, checkTaskTargets: false);
+                var policyErrors = new List<string>();
+                ReviewLatestTaskTargets(review, topology, workspace, latest =>
+                {
+                    try
+                    {
+                        OperationCancellation.ThrowIfCancellationRequested();
+                        return NodePolicyReferences(latest, ReadMaintenanceNodeDatabase(latest, report: report));
+                    }
+                    catch (Exception error)
+                    {
+                        if (!(error is IOException) && !(error is UnauthorizedAccessException) && !(error is NotSupportedException))
+                            throw;
+                        RuntimeDiagnostics.Record("Backup.Desktop/IntegrityReview.cs:ReviewLatestTaskTargets", error);
+                        policyErrors.Add(latest + "：最新版本副本引用未核实：" + error.Message);
+                        return null;
+                    }
+                });
                 bool repairCatalog = review.Findings.Any(item => item.ArchiveId > 0 && item.RequiresManualRepairConfirmation && !review.ObsoleteIds.Contains(item.ArchiveId) &&
                     Catalog.GetArchive(item.ArchiveId)
                     .TaskId == "__catalog__");
                 var errors = RepairReviewFiles(review, report).ToList();
+                errors.AddRange(policyErrors);
                 errors.AddRange(rotationErrors);
                 errors.AddRange(taskDeleteErrors);
                 errors.AddRange(temporaryErrors);
@@ -793,7 +842,7 @@ namespace Backup.Desktop
                 errors.AddRange(RunConfirmedRepairs(workspace, report, IntegrityTaskIds(taskIds), progress, cleanupProgress, false, true, repairIds, false, true));
                 // Reclassify entries exposed by intent cleanup or unregistration using
                 // committed inventory changes, without repeating directory enumeration.
-                var residual = ReviewCommittedInventory(review);
+                var residual = ReviewCommittedInventory(review, topology);
                 var attempted = new HashSet<string>(review.Findings.Where(item => item.RepairAction == "delete-orphan").Select(item => item.Destination + "\0" + item.Folder + "\0" + item.Name));
                 var newOrphans = new AllBackupCheckResult
                 {
@@ -807,8 +856,7 @@ namespace Backup.Desktop
                 errors.AddRange(RepairReviewFiles(newOrphans, report));
                 // Reuse the directory inventory and operation-result notifications. Only
                 // formerly anomalous names are statted; never repeat a full tree scan.
-                FlushRepositoryResults();
-                var currentReview = ReviewCommittedInventory(review);
+                var currentReview = ReviewCommittedInventory(review, topology, residual);
                 var remaining = new List<string>();
                 Dictionary<string, DestinationDefinition> recheckDefinitions = null;
                 // A repaired pool may retain a different member. Verify current
@@ -890,7 +938,7 @@ namespace Backup.Desktop
                     if (!errors.Contains(error))
                         errors.Add(error);
                 errors.AddRange(remaining);
-                var final = Catalog.RecoveryRevision == currentReview.RecoveryRevision ? currentReview : ReviewCommittedInventory(currentReview);
+                var final = Catalog.RecoveryRevision == currentReview.RecoveryRevision ? currentReview : ReviewCommittedInventory(currentReview, topology);
                 foreach (var finding in final.Findings.Where(item => item.RequiresManualRepairConfirmation))
                     if (!errors.Any(message => message.Contains(finding.Name)))
                         errors.Add(finding.Name + "：" + IntegrityMismatch(finding));
@@ -909,7 +957,7 @@ namespace Backup.Desktop
                         var retiredCatalogs = Catalog.ListArchives(true).Where(item => item.TaskId == "__catalog__" && (item.Status == "cleaned" || item.Status == "snapshot-history")).Select(item => item.ArchiveName)
                             .ToList();
                         errors.RemoveAll(message => retiredCatalogs.Any(name => message.StartsWith(name + "：", StringComparison.Ordinal)));
-                        final = ReviewCommittedInventory(final);
+                        final = ReviewCommittedInventory(final, topology);
                     }
                     catch (Exception error)
                     {

@@ -12,6 +12,7 @@ namespace Backup.Desktop
         private ISet<string> historySummaryScope;
         private DateTime historySummaryTime;
         private int historySummaryDirectoryErrors, historySummaryRepairErrors, historySummaryManagedFiles, historySummaryRegistrationIssues, historySummaryObsoleteArchives;
+        private int historySummaryUnresolvedTaskPolicies;
         private long historySummaryStamp = long.MinValue;
         private BackupIntegritySummary historySummaryCounts;
         private OperationState historySummaryState;
@@ -52,6 +53,7 @@ namespace Backup.Desktop
             historySummaryManagedFiles = review == null ? 0 : review.ManagedUnregistered;
             historySummaryRegistrationIssues = review == null ? 0 : review.RegistrationAnomalies;
             historySummaryObsoleteArchives = review == null ? 0 : review.ObsoleteIds.Count;
+            historySummaryUnresolvedTaskPolicies = review == null ? 0 : review.UnresolvedTaskPolicies.Count;
             historySummaryActive = true;
             historySummaryScope = taskIds == null ? null : new HashSet<string>(taskIds);
             historySummaryTime = DateTime.Now;
@@ -88,6 +90,8 @@ namespace Backup.Desktop
                 text += " " + counts.PendingCopies + " 项待确认。";
             if (counts.IncompleteArchives > 0)
                 text += " " + counts.IncompleteArchives + " 个压缩包副本不足。";
+            if (historySummaryUnresolvedTaskPolicies > 0)
+                text += " " + historySummaryUnresolvedTaskPolicies + " 个任务的最新版本副本引用待核实。";
             if (historySummaryRepairErrors > 0)
                 text += " 修复未完成：" + historySummaryRepairErrors + " 项待重试。";
             historySummaryState = counts.RepairCopies > 0 || historySummaryRepairErrors > 0 || historySummaryManagedFiles > 0 || historySummaryRegistrationIssues > 0 || historySummaryObsoleteArchives > 0 
@@ -95,7 +99,7 @@ namespace Backup.Desktop
                 : counts.UnavailableCopies > 0 ||
                 counts.PendingCopies > 0 ||
                 counts.IncompleteArchives > 0 ||
-                historySummaryDirectoryErrors > 0 
+                historySummaryDirectoryErrors > 0 || historySummaryUnresolvedTaskPolicies > 0
                 ? OperationState.Attention 
                 : OperationState.Succeeded;
             Text("HistoryCheckSummary").Visibility = Visibility.Visible;
