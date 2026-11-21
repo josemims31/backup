@@ -47,7 +47,8 @@ namespace Backup.Desktop
             Text("HistoryCheckSummary").Text = message;
         }
 
-        private void PublishHistoryCheckSummary(IList<string> taskIds, int directoryErrors, int repairErrors = 0)
+        private void PublishHistoryCheckSummary(IList<string> taskIds, int directoryErrors, int repairErrors = 0,
+            BackupIntegritySummary counts = null, long stamp = long.MinValue)
         {
             var review = Backend.LastIntegrityReview;
             historySummaryManagedFiles = review == null ? 0 : review.ManagedUnregistered;
@@ -59,7 +60,8 @@ namespace Backup.Desktop
             historySummaryTime = DateTime.Now;
             historySummaryDirectoryErrors = directoryErrors;
             historySummaryRepairErrors = repairErrors;
-            historySummaryStamp = long.MinValue;
+            historySummaryCounts = counts;
+            historySummaryStamp = stamp;
             RefreshHistoryCheckSummary();
         }
 

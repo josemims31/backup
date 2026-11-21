@@ -497,6 +497,13 @@ namespace Backup.Core
 
         public IList<IntegrityFinding> CheckIntegrity(long archiveId, IEnumerable<StoredCopy> copies, IDictionary<string, DestinationDefinition> definitions, System.Threading.CancellationToken cancellation)
         {
+            return CheckIntegrity(archiveId, copies, definitions, cancellation,
+                observation => catalog.RecordIntegrity(observation.ArchiveId, observation.GroupId, observation.Findings));
+        }
+
+        public IList<IntegrityFinding> CheckIntegrity(long archiveId, IEnumerable<StoredCopy> copies, IDictionary<string, DestinationDefinition> definitions,
+            System.Threading.CancellationToken cancellation, Action<IntegrityObservation> record)
+        {
             var all = new List<IntegrityFinding>();
             foreach (var group in copies.GroupBy(x => x.GroupId))
             {
@@ -536,7 +543,7 @@ namespace Backup.Core
                 cancellation.ThrowIfCancellationRequested();
                 foreach (var finding in findings)
                     finding.ArchiveId = archiveId;
-                catalog.RecordIntegrity(archiveId, group.Key, findings);
+                record(new IntegrityObservation { ArchiveId = archiveId, GroupId = group.Key, Findings = findings });
                 all.AddRange(findings);
             }
 

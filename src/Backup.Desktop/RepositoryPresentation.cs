@@ -120,6 +120,7 @@ namespace Backup.Desktop
         private readonly HashSet<string> repositoryUpdates = new HashSet<string>(), sourceUpdates = new HashSet<string>(), taskUpdates = new HashSet<string>();
         private CatalogChange presentationChanges;
         private bool allTaskUpdates;
+        private volatile bool deferIntegrityPresentation;
         private int repositoryUpdatePosted;
         private readonly Dictionary<string, RepositoryFolderChange> folderUpdates = new Dictionary<string, RepositoryFolderChange>();
         private long presentedCatalogStamp = long.MinValue;
@@ -150,7 +151,7 @@ namespace Backup.Desktop
                 }
             }
 
-            if (!closeAfterWork && Interlocked.Exchange(ref repositoryUpdatePosted, 1) == 0)
+            if (!deferIntegrityPresentation && !closeAfterWork && Interlocked.Exchange(ref repositoryUpdatePosted, 1) == 0)
                 try
                 {
                     Window.Dispatcher.BeginInvoke(
@@ -179,7 +180,7 @@ namespace Backup.Desktop
         private void ApplyRepositoryPresentation()
         {
             Interlocked.Exchange(ref repositoryUpdatePosted, 0);
-            if (disposed || closeAfterWork || operations.ActiveKind == OperationKind.Import)
+            if (disposed || closeAfterWork || deferIntegrityPresentation || operations.ActiveKind == OperationKind.Import)
                 return;
             HashSet<string> ids, sources, tasks;
             List<RepositoryFolderChange> folders;

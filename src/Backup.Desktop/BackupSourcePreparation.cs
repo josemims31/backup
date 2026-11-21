@@ -67,152 +67,147 @@ namespace Backup.Desktop
             internal string Path, ArchivePath, Root;
         }
 
+        private sealed class PreparedSourceList
+        {
+            internal IList<SourceDefinition> Sources;
+            internal IEnumerable<SourceItem> Indexed;
+        }
+
         private readonly object preparedSourceGate = new object();
-        private readonly Dictionary<string, Func<IList<MissingSourceCheck>>> preparedSourceChecks = new Dictionary<string, Func<IList<MissingSourceCheck>>>();
-        private int ReconcileTaskBackupScope(BackupTaskDefinition task)
+        private readonly Dictionary<string, PreparedSourceList> preparedSourceLists = new Dictionary<string, PreparedSourceList>();
+        private void ReconcileBackupSources(BackupTaskDefinition task, PreparedSourceList prepared, DesktopBackupResult result, Action<DesktopProgress> progress)
         {
             var workspace = WorkspaceMigration.Load(Catalog);
             var roots = workspace.Sources.Where(source => !source.Deleted && task.SourceIds.Contains(source.Id)).Select(source => source.Location).ToList();
             var exclusions = new BackupExclusions(Rules());
             var protectedRoots = ProtectedRoots();
+            var scannedRoots = prepared == null ? null : SourceCheckRoots(prepared.Sources);
+            var indexed = prepared == null ? null : new HashSet<string>(prepared.Indexed.Select(item => item.Path), StringComparer.OrdinalIgnoreCase);
             var removed = new HashSet<string>(StringComparer.Ordinal);
+            var missing = new Dictionary<string, MissingSourceCheck>(StringComparer.Ordinal);
+            var observed = new HashSet<string>(StringComparer.Ordinal);
             foreach (var row in Catalog.GetKnownSourceFiles(task.Id))
             {
                 if (ActiveBackup != null)
                     ActiveBackup.Checkpoint();
                 if (StopRequested)
-                    return 0;
+                    return;
                 string path = SourcePath(row);
                 if (!roots.Any(root => Under(path, root)) || !task.Selection.Includes(path) || exclusions.Match(path) != null || protectedRoots.Any(root => Under(path, root)))
                     removed.Add(row.Path);
+                else if (indexed != null)
+                {
+                    if (indexed.Contains(path))
+                        observed.Add(row.Path);
+                    else
+                        AddMissingSourceCheck(missing, row.Path, path, scannedRoots);
+                }
             }
 
+            var confirmed = ConfirmMissingSources(missing.Values.Where(item => item.Root != null &&
+                !removed.Contains(item.ArchivePath) && !observed.Contains(item.ArchivePath)).ToList(), progress);
             if (ActiveBackup != null)
                 ActiveBackup.Checkpoint();
             if (StopRequested)
-                return 0;
-            // Removing a file from the task is a logical deletion. Keep its old package
-            // held until the catalog publication/cleanup workflow has committed it.
+                return;
+            result.RemovedFromScope = removed.Count;
+            result.ConfirmedDeleted += confirmed.Count;
+            removed.UnionWith(confirmed);
+            // Keep previous packages held until the new version is published.
             Catalog.MarkDeletedPaths(task.Id, removed, true);
-            return removed.Count;
+        }
+
+        private static IList<string> SourceCheckRoots(IEnumerable<SourceDefinition> sources)
+        {
+            return sources.Where(source => !source.Deleted && !string.IsNullOrWhiteSpace(source.Location))
+                .Select(source => source.Location).OrderByDescending(root => root.Length).ToList();
+        }
+
+        private static void AddMissingSourceCheck(IDictionary<string, MissingSourceCheck> checks, string archivePath, string path, IList<string> roots)
+        {
+            string root = roots.FirstOrDefault(candidate => Under(path, candidate));
+            MissingSourceCheck prior;
+            if (!checks.TryGetValue(archivePath, out prior))
+                checks.Add(archivePath, new MissingSourceCheck { Path = path, ArchivePath = archivePath, Root = root });
+            else if (root == null || !string.Equals(path, prior.Path, StringComparison.OrdinalIgnoreCase))
+                prior.Root = null;
         }
 
         private IList<MissingSourceCheck> MissingSourceChecks(BackupTaskDefinition task, IList<SourceDefinition> sources, IEnumerable<SourceItem> indexed)
         {
-            var present = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var item in indexed)
-                present.Add(item.Path);
-            var checks = new List<MissingSourceCheck>();
+            var present = new HashSet<string>(indexed.Select(item => item.Path), StringComparer.OrdinalIgnoreCase);
+            var roots = SourceCheckRoots(sources);
+            var checks = new Dictionary<string, MissingSourceCheck>(StringComparer.Ordinal);
+            var observed = new HashSet<string>(StringComparer.Ordinal);
             foreach (var row in Catalog.GetKnownSourceFiles(task.Id))
             {
                 if (ActiveBackup != null)
                     ActiveBackup.Checkpoint();
                 string path = SourcePath(row);
                 if (present.Contains(path))
-                    continue;
-                foreach (var source in sources)
-                    if (path.StartsWith(source.Location.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase))
-                    {
-                        checks.Add(new MissingSourceCheck { Path = path, ArchivePath = row.Path, Root = source.Location });
-                        break;
-                    }
+                    observed.Add(row.Path);
+                else
+                    AddMissingSourceCheck(checks, row.Path, path, roots);
             }
-
-            return checks;
+            return checks.Values.Where(item => item.Root != null && !observed.Contains(item.ArchivePath)).ToList();
         }
 
-        private void PrepareMissingSourceChecks(BackupTaskDefinition task, IList<SourceDefinition> sources, IEnumerable<SourceItem> indexed)
+        private void PrepareSourceList(BackupTaskDefinition task, IList<SourceDefinition> sources, IEnumerable<SourceItem> indexed)
         {
             lock (preparedSourceGate)
-                preparedSourceChecks[task.Id] = () => task.RecoveryPendingConfirmation ? new List<MissingSourceCheck>() : MissingSourceChecks(task, sources, indexed);
+                preparedSourceLists[task.Id] = new PreparedSourceList { Sources = sources, Indexed = indexed };
         }
 
-        private IList<MissingSourceCheck> TakeMissingSourceChecks(string taskId)
+        private PreparedSourceList TakePreparedSourceList(string taskId)
         {
-            Func<IList<MissingSourceCheck>> checks;
             lock (preparedSourceGate)
             {
-                if (!preparedSourceChecks.TryGetValue(taskId, out checks))
-                    return new MissingSourceCheck[0];
-                preparedSourceChecks.Remove(taskId);
+                PreparedSourceList prepared;
+                preparedSourceLists.TryGetValue(taskId, out prepared);
+                preparedSourceLists.Remove(taskId);
+                return prepared;
             }
-
-            return checks();
-        }
-
-        private void DiscardMissingSourceChecks(string taskId)
-        {
-            lock (preparedSourceGate)
-                preparedSourceChecks.Remove(taskId);
         }
 
         private void ClearPreparedSourceChecks()
         {
             lock (preparedSourceGate)
-                preparedSourceChecks.Clear();
+                preparedSourceLists.Clear();
         }
 
-        private int ConfirmMissingSources(string taskId, IList<MissingSourceCheck> checks)
+        private ISet<string> ConfirmMissingSources(IList<MissingSourceCheck> checks, Action<DesktopProgress> progress = null)
         {
-            int confirmed = 0;
-            var unavailable = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var checkedRoots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var item in checks)
+            var confirmed = new HashSet<string>(StringComparer.Ordinal);
+            if (checks.Count == 0)
+                return confirmed;
+            var directories = new SourceDirectoryChecks(this);
+            Action<int> report = count =>
             {
+                if (progress != null)
+                    progress(new DesktopProgress {
+                        Message = "正在核对源文件是否已删除 · " + count + " / " + checks.Count,
+                        CheckedSourceDeletions = count,
+                        TotalSourceDeletions = checks.Count
+                    });
+            };
+            report(0);
+            var interval = System.Diagnostics.Stopwatch.StartNew();
+            for (int index = 0; index < checks.Count; index++)
+            {
+                OperationCancellation.ThrowIfCancellationRequested();
                 if (ActiveBackup != null)
                     ActiveBackup.Checkpoint();
                 if (StopRequested)
                     break;
-                if (unavailable.Contains(item.Root))
-                    continue;
-                if (!checkedRoots.Contains(item.Root))
+                var item = checks[index];
+                if (directories.IsMissing(item.Path, item.Root))
+                    confirmed.Add(item.ArchivePath);
+                if (index + 1 == checks.Count || interval.ElapsedMilliseconds >= 250)
                 {
-                    try
-                    {
-                        if ((File.GetAttributes(item.Root) & FileAttributes.Directory) == 0)
-                        {
-                            unavailable.Add(item.Root);
-                            continue;
-                        }
-
-                        checkedRoots.Add(item.Root);
-                    }
-                    catch (IOException)
-                    {
-                        unavailable.Add(item.Root);
-                        continue;
-                    }
-                    catch (UnauthorizedAccessException)
-                    {
-                        unavailable.Add(item.Root);
-                        continue;
-                    }
-                }
-
-                try
-                {
-                    File.GetAttributes(item.Path);
-                }
-                catch (FileNotFoundException)
-                {
-                    if (ConfirmDeleted(taskId, item.ArchivePath, item.Path, item.Root))
-                        confirmed++;
-                }
-                catch (DirectoryNotFoundException)
-                {
-                    if (ConfirmDeleted(taskId, item.ArchivePath, item.Path, item.Root))
-                        confirmed++;
-                }
-                catch (IOException)
-                {
-                    unavailable.Add(item.Root);
-                }
-                catch (UnauthorizedAccessException)
-                {
-                    unavailable.Add(item.Root);
+                    report(index + 1);
+                    interval.Restart();
                 }
             }
-
             return confirmed;
         }
 
@@ -262,13 +257,14 @@ namespace Backup.Desktop
             string taskId,
             bool forceBackup,
             Action<SourceItem> sourceMissing,
-            WorkspaceDefinition workspace,
             ArchiveRootLayout layout,
             IDictionary<string, FileBackupView> prior,
             StorageTopology topology,
             int target,
             IDictionary<long, bool> coverage,
-            Func<SourceItem, TaskSourcePolicy> sourcePolicy
+            Func<SourceItem, TaskSourcePolicy> sourcePolicy,
+            SourceDirectoryChecks missingDirectories,
+            IList<string> sourceRoots
         )
         {
             var control = ActiveBackup;
@@ -288,7 +284,7 @@ namespace Backup.Desktop
             {
                 if (forceBackup && sourceMissing == null)
                     throw;
-                if (!ConfirmMissingBackupSource(original, taskId, sourceMissing, workspace))
+                if (!ConfirmMissingBackupSource(original, taskId, sourceMissing, missingDirectories, sourceRoots))
                 {
                     result.Stopped = true;
                     return null;
@@ -301,7 +297,7 @@ namespace Backup.Desktop
             {
                 if (forceBackup && sourceMissing == null)
                     throw;
-                if (!ConfirmMissingBackupSource(original, taskId, sourceMissing, workspace))
+                if (!ConfirmMissingBackupSource(original, taskId, sourceMissing, missingDirectories, sourceRoots))
                 {
                     result.Stopped = true;
                     return null;
@@ -342,12 +338,14 @@ namespace Backup.Desktop
         )
         {
             var current = new List<SourceItem>();
+            var missingDirectories = new SourceDirectoryChecks(this);
+            var sourceRoots = SourceCheckRoots(workspace.Sources);
             long bytes = 0;
             string currentPolicy = null;
             foreach (var group in planned)
                 foreach (var original in group)
                 {
-                    var item = ReadBackupSource(original, result, taskId, forceBackup, sourceMissing, workspace, layout, prior, topology, target, coverage, sourcePolicy);
+                    var item = ReadBackupSource(original, result, taskId, forceBackup, sourceMissing, layout, prior, topology, target, coverage, sourcePolicy, missingDirectories, sourceRoots);
                     if (result.Stopped)
                         yield break;
                     adjustTotal((item == null ? 0 : item.Size) - original.Size);
@@ -385,15 +383,17 @@ namespace Backup.Desktop
                 yield return current;
         }
 
-        private bool ConfirmMissingBackupSource(SourceItem source, string taskId, Action<SourceItem> sourceMissing, WorkspaceDefinition workspace)
+        private bool ConfirmMissingBackupSource(SourceItem source, string taskId, Action<SourceItem> sourceMissing, SourceDirectoryChecks directories, IList<string> sourceRoots)
         {
             ActiveBackup.Checkpoint();
             if (StopRequested)
                 return false;
-            ValidateMissingCompactionSource(source.Path, workspace);
+            bool missing = directories.IsMissing(source.Path, sourceRoots.FirstOrDefault(root => Under(source.Path, root)));
             ActiveBackup.Checkpoint();
             if (StopRequested)
                 return false;
+            if (!missing)
+                throw new IOException("无法确认源文件已删除，旧包保留：" + source.Path);
             if (sourceMissing != null)
                 sourceMissing(source);
             else

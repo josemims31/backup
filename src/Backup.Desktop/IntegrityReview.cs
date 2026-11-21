@@ -72,7 +72,8 @@ namespace Backup.Desktop
             });
         }
 
-        private void CompleteIntegrityReview(AllBackupCheckResult review, IDictionary<string, Dictionary<string, WarehouseDirectoryRead>> snapshots, StorageTopology topology, bool checkTaskTargets = true)
+        private void CompleteIntegrityReview(AllBackupCheckResult review, IDictionary<string, Dictionary<string, WarehouseDirectoryRead>> snapshots,
+            StorageTopology topology, bool checkTaskTargets = true, IDictionary<string, IList<StoredArchiveObject>> registeredObjects = null)
         {
             review.ArchiveTasks = IntegrityTaskIds(review.TaskIds);
             review.Directories = snapshots.ToDictionary(pair => pair.Key, pair => pair.Value.Values.Select(value => value.Record.Folder).Distinct().ToList());
@@ -91,7 +92,10 @@ namespace Backup.Desktop
                 if (!snapshots.TryGetValue(definition.Id, out folders))
                     continue;
                 bool local = RepositoryModules.IsFileSystem(definition.Protocol);
-                var known = Catalog.GetWarehouseObjects(definition.Id).ToDictionary(item => item.Name, local ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+                IList<StoredArchiveObject> recordedObjects;
+                if (registeredObjects == null || !registeredObjects.TryGetValue(definition.Id, out recordedObjects))
+                    recordedObjects = Catalog.GetWarehouseObjects(definition.Id);
+                var known = recordedObjects.ToDictionary(item => item.Name, local ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
                 foreach (var read in folders.Values.Where(read => read.Entries != null))
                     foreach (var entry in read.Entries)
                     {
@@ -458,6 +462,7 @@ namespace Backup.Desktop
             result.ObsoleteIds.UnionWith(Catalog.ObsoleteOwnedArchiveIds(scope));
             result.ObsoleteIds.UnionWith(original.ObsoleteIds.Where(id => Catalog.GetArchive(id).Status != "cleaned" && !Catalog.ArchiveHasCurrentFiles(id)));
             var snapshots = new Dictionary<string, Dictionary<string, WarehouseDirectoryRead>>();
+            var registeredObjects = new Dictionary<string, IList<StoredArchiveObject>>();
             var definitions = topology.Destinations.ToDictionary(item => item.Id);
             foreach (var pair in original.Directories)
             {
@@ -468,7 +473,9 @@ namespace Backup.Desktop
                 bool local = RepositoryModules.IsFileSystem(definition.Protocol);
                 var locations = Catalog.ObjectStorageDirectories(pair.Key);
                 var folders = new HashSet<string>(pair.Value);
-                foreach (var item in Catalog.GetWarehouseObjects(pair.Key).Where(item => scope == null || scope.Contains(item.TaskId)))
+                var registered = Catalog.GetWarehouseObjects(pair.Key);
+                registeredObjects.Add(pair.Key, registered);
+                foreach (var item in registered.Where(item => scope == null || scope.Contains(item.TaskId)))
                 {
                     string directory;
                     if (locations.TryGetValue(item.Name, out directory))
@@ -494,7 +501,7 @@ namespace Backup.Desktop
                 snapshots[pair.Key] = records;
             }
 
-            CompleteIntegrityReview(result, snapshots, topology, checkTaskTargets);
+            CompleteIntegrityReview(result, snapshots, topology, checkTaskTargets, registeredObjects);
             return result;
         }
 
@@ -675,10 +682,10 @@ namespace Backup.Desktop
 
                     // Re-evaluate ownership immediately before a destructive action.
                     // A successfully registered/committed late upload always wins.
-                    if (Catalog.GetWarehouseObjects(finding.Destination).Any(item => item.Name == finding.Name))
+                    if (Catalog.GetWarehouseObjectsByName(finding.Destination, new[] { finding.Name }).Count != 0)
                         continue;
-                    var owner = Catalog.ListArchives(true).FirstOrDefault(a => a.ArchiveName == BackupObjectNaming.ArchiveName(finding.Name) && a.Status != "cleaned");
-                    if (owner != null && !review.ObsoleteIds.Contains(owner.ArchiveId) && !Catalog.HasCompleteArchiveManifest(owner.ArchiveId))
+                    var owner = Catalog.FindActiveArchiveId(BackupObjectNaming.ArchiveName(finding.Name));
+                    if (owner.HasValue && !review.ObsoleteIds.Contains(owner.Value) && !Catalog.HasCompleteArchiveManifest(owner.Value))
                     {
                         errors.Add(finding.Name + "：分卷清单缺失或不完整，已保留现有文件及版本引用。");
                         continue;

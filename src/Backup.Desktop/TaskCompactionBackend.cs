@@ -29,13 +29,6 @@ namespace Backup.Desktop
                 ActiveBackup.Checkpoint();
         }
 
-        private void ValidateMissingCompactionSource(string path, WorkspaceDefinition workspace)
-        {
-            string root = workspace.Sources.Where(s => !s.Deleted && !string.IsNullOrWhiteSpace(s.Location) && Under(path, s.Location)).OrderByDescending(s => s.Location.Length).Select(s => s.Location)
-                .FirstOrDefault();
-            ValidateSourceMissing(path, root);
-        }
-
         public TaskCompactionResult CompactTaskArchives(
             BackupTaskDefinition task,
             Action<DesktopProgress> progress = null,
@@ -167,26 +160,11 @@ namespace Backup.Desktop
                     CompactionPoint("before-publish");
                     foreach (var source in survivors)
                         source.CheckUnchanged();
+                    var directories = new SourceDirectoryChecks(this);
+                    var sourceRoots = SourceCheckRoots(workspace.Sources);
                     foreach (string path in deletedSources)
-                    {
-                        bool stillMissing = false;
-                        try
-                        {
-                            File.GetAttributes(path);
-                        }
-                        catch (FileNotFoundException)
-                        {
-                            stillMissing = true;
-                        }
-                        catch (DirectoryNotFoundException)
-                        {
-                            stillMissing = true;
-                        }
-
-                        if (!stillMissing)
-                            throw new IOException("源文件已重新出现，旧包保留：" + path);
-                        ValidateMissingCompactionSource(path, workspace);
-                    }
+                        if (!directories.IsMissing(path, sourceRoots.FirstOrDefault(root => Under(path, root))))
+                            throw new IOException("无法确认源文件仍处于删除状态，旧包保留：" + path);
 
                     result.NewArchives = session.NewArchives.Count;
                     session.Publish(deleted, Catalog.LoadTopology().Scope(task.TargetIds), task.RequiredCopies);

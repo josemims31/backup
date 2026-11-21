@@ -29,9 +29,8 @@ namespace Backup.Desktop
             task.Copies = active.Copies;
             if (ActiveBackup != null)
                 ActiveBackup.Checkpoint();
-            // Defer deletion-candidate construction until source changes are known; probes run after the
-            // requested data batches, before catalog publication and old-object cleanup.
-            PrepareMissingSourceChecks(task, sources, indexed);
+            // Use the same source list during reconciliation, after writing the data packages.
+            PrepareSourceList(task, sources, indexed);
             return new List<string>();
         }
     }

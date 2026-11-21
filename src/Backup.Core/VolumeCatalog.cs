@@ -388,44 +388,5 @@ namespace Backup.Core
             }
         }
 
-        private void RecordVolumeIntegrity(long id, string group, IList<IntegrityFinding> findings)
-        {
-            var inspectedStates = IntegrityCopyStates(id);
-            foreach (var finding in findings)
-            {
-                if (Scalar("SELECT count(*) FROM object_copies WHERE name=? AND destination_id=? AND group_id=?", finding.Name, finding.Destination, group) != 1)
-                    throw new IOException("完整性记录与备份副本不匹配。");
-                string state = ObservedCopyState(finding, inspectedStates[finding.Destination + "\0" + finding.Name]);
-                database.Execute("UPDATE object_copies SET state=? WHERE name=? AND destination_id=? AND state<>?", state, finding.Name, finding.Destination, state);
-            }
-
-            foreach (var member in findings.GroupBy(f => f.Destination))
-            {
-                string state = member.Any(f => f.RequiresManualRepairConfirmation) 
-                    ? "repair-required" 
-                    : member.Any(f => f.Status.StartsWith("unavailable", StringComparison.Ordinal)) ? "unavailable" : "complete";
-                database.Execute(
-                    ("UPDATE placements SET status=? WHERE archive_id=? AND group_id=? AND destination_id=? AND reserved=0 AND (status IN " +
-                    "('complete','repair-required','unavailable','failed') OR ?=1 AND status NOT IN ('detached','retired','cleaned')) AND status<>?"),
-                    state,
-                    id,
-                    group,
-                    member.Key,
-                    findings.Any(item => item.RepairApplied),
-                    state
-                );
-            }
-
-            var counts = VolumeStatistics(id)[id];
-            long target = Scalar("SELECT target_copies FROM archives WHERE id=?", id);
-            bool damaged = Scalar(
-                ("SELECT count(*) FROM object_copies c JOIN objects o ON o.name=c.name WHERE o.archive_id=? AND (c.state='missing' OR " +
-                "c.state='size-or-name-mismatch' OR c.state='content-damaged')"),
-                id
-            ) > 0 ||
-                Scalar("SELECT count(*) FROM volume_transfers t JOIN objects o ON o.name=t.name WHERE o.archive_id=? AND (t.state LIKE 'checked-%' OR t.state LIKE 'damaged-%')", id) > 0;
-            string status = damaged ? "repair-required" : counts[1] >= target ? "complete" : "redundancy-shortfall";
-            database.Execute("UPDATE archives SET status=? WHERE id=? AND status IN ('complete','repair-required','redundancy-shortfall') AND status<>?", status, id, status);
-        }
     }
 }

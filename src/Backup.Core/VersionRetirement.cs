@@ -16,7 +16,10 @@ namespace Backup.Core
 
         private void HoldRetiringPaths(string taskId, IEnumerable<string> paths)
         {
-            database.ExecuteMany(HoldRetiringSql, paths.Select(path => new object[] { "version-retire:" + taskId, taskId, path, path, null, null, null }));
+            string reason = "version-retire:" + taskId;
+            database.ExecuteMany("INSERT OR IGNORE INTO archive_holds(archive_id,reason) SELECT f.archive_id,? " +
+                "FROM archive_files f JOIN archives a ON a.id=f.archive_id WHERE f.path=? AND f.state='current' AND a.task_id=?",
+                paths.Select(path => new object[] { reason, path, taskId }));
         }
 
         public void ReleasePublishedRetirements(string taskId)

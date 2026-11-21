@@ -433,6 +433,15 @@ namespace Backup.Core
             }
         }
 
+        public long? FindActiveArchiveId(string name)
+        {
+            lock (gate)
+            {
+                var rows = database.Query("SELECT id FROM archives WHERE name=? AND status<>'cleaned'", name);
+                return rows.Count == 0 ? (long?)null : (long)rows[0][0];
+            }
+        }
+
         public IList<ArchiveSummary> ListArchives(bool includeSystem = false)
         {
             lock (gate)
@@ -524,68 +533,6 @@ namespace Backup.Core
                 }
                 })
                     .ToList();
-        }
-
-        public void RecordIntegrity(long id, string groupId, IList<IntegrityFinding> findings)
-        {
-            Transaction(delegate
-            {
-                RepositoryStatusChanged(CatalogChange.Archives, (string)database.Query("SELECT task_id FROM archives WHERE id=?", id).Single()[0]);
-                RepositoryDestinationsChanged(findings.Select(f => f.Destination));
-                if (IsVolumeArchive(id))
-                {
-                    RecordVolumeIntegrity(id, groupId, findings);
-                    return 0;
-                }
-
-                long expected = Scalar(
-                    ("SELECT count(*) FROM object_copies c JOIN objects o ON c.name=o.name JOIN placements p ON p.archive_id=o.archive_id AND p.group_id=c.group_id AND " +
-                    "p.destination_id=c.destination_id WHERE o.archive_id=? AND c.group_id=? AND c.state<>'deleted'"),
-                    id,
-                    groupId
-                );
-                if (expected != findings.Count)
-                    throw new InvalidOperationException("Incomplete integrity observation.");
-                var inspectedStates = IntegrityCopyStates(id);
-                foreach (IntegrityFinding finding in findings)
-                {
-                    if (Scalar(
-                        "SELECT count(*) FROM object_copies c JOIN objects o ON c.name=o.name WHERE o.archive_id=? AND c.group_id=? AND c.destination_id=? AND c.name=?",
-                        id,
-                        groupId,
-                        finding.Destination,
-                        finding.Name
-                    ) != 1)
-                        throw new InvalidOperationException("Integrity observation does not match a catalog copy.");
-                    string state = ObservedCopyState(finding, inspectedStates[finding.Destination + "\0" + finding.Name]);
-                    database.Execute("UPDATE object_copies SET state=? WHERE name=? AND destination_id=? AND state<>?", state, finding.Name, finding.Destination, state);
-                }
-
-                foreach (var destination in findings.GroupBy(f => f.Destination))
-                {
-                    string state = destination.Any(f => f.RequiresManualRepairConfirmation) 
-                        ? "repair-required" 
-                        : destination.Any(f => f.Status.StartsWith("unavailable", StringComparison.Ordinal)) ? "unavailable" : "complete";
-                    database.Execute(
-                        ("UPDATE placements SET status=? WHERE archive_id=? AND group_id=? AND destination_id=? AND (status IN ('complete','repair-required','unavailable') OR ?=1 AND " +
-                        "status NOT IN ('detached','retired','cleaned')) AND status<>?"),
-                        state,
-                        id,
-                        groupId,
-                        destination.Key,
-                        findings.Any(item => item.RepairApplied),
-                        state
-                    );
-                }
-
-                long target = Scalar("SELECT target_copies FROM archives WHERE id=?", id);
-                long complete = Scalar("SELECT count(*) FROM placements WHERE archive_id=? AND status='complete'", id);
-                string status = Scalar("SELECT count(*) FROM placements WHERE archive_id=? AND status='repair-required'", id) != 0 
-                    ? "repair-required" 
-                    : complete >= target ? "complete" : "redundancy-shortfall";
-                database.Execute("UPDATE archives SET status=? WHERE id=? AND status IN ('complete','repair-required','redundancy-shortfall') AND status<>?", status, id, status);
-                return 0;
-            });
         }
 
         public void CreateSnapshot(string path)

@@ -143,7 +143,7 @@ namespace Backup.Desktop
             SetHistoryCheckText("正在检查计划关联任务…", OperationState.Running);
             try
             {
-                var result = await Task.Run(() => Backend.CheckAllBackups(report, taskIds));
+                var result = await ReadIntegrityCheckAsync(taskIds);
                 var scope = new HashSet<string>(taskIds);
                 int before = Backend.KnownRepairArchives(Workspace, scope).Count;
                 SetBusy(true, true, "任务计划：修复备份完整性…");

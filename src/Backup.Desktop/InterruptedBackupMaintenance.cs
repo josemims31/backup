@@ -401,6 +401,13 @@ namespace Backup.Desktop
                             foreach (string name in Catalog.UploadStages(item.DestinationId, item.Name))
                             {
                                 var info = adapter.Stat(name);
+                                if (info.UnavailableReason != null)
+                                {
+                                    unavailable = true;
+                                    result.Add(new IntegrityFinding { ArchiveId = item.ArchiveId, ArchiveLevel = true, Destination = item.DestinationId, Name = item.Name,
+                                        Status = "unavailable: " + info.UnavailableReason });
+                                    continue;
+                                }
                                 if (!info.Exists)
                                     continue;
                                 found = true;

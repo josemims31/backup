@@ -14,19 +14,22 @@ namespace Backup.Core
         {
             lock (gate)
             {
-                var archive = GetArchive(id);
+                var rows = database.Query("SELECT name FROM archives WHERE id=?", id);
+                if (rows.Count != 1)
+                    throw new ArgumentException("Unknown archive.");
+                string archiveName = (string)rows[0][0];
                 var objects = GetObjects(id);
                 if (objects.Count == 0 || objects.Any(item => item.Size <= 0))
                     return false;
-                if (objects.Count == 1 && objects[0].Name == archive.ArchiveName)
+                if (objects.Count == 1 && objects[0].Name == archiveName)
                     return true;
                 var numbers = new HashSet<int>();
                 foreach (var item in objects)
                 {
                     int number;
-                    if (!item.Name.StartsWith(archive.ArchiveName + ".", StringComparison.Ordinal))
+                    if (!item.Name.StartsWith(archiveName + ".", StringComparison.Ordinal))
                         return false;
-                    string suffix = item.Name.Substring(archive.ArchiveName.Length + 1);
+                    string suffix = item.Name.Substring(archiveName.Length + 1);
                     if (!int.TryParse(suffix, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out number) || number < 1 ||
                         suffix != number.ToString("D3", System.Globalization.CultureInfo.InvariantCulture) ||
                         !numbers.Add(number))

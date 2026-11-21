@@ -1,6 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
-using System.Linq;
+using Backup.Core;
 
 namespace Backup.Desktop
 {
@@ -8,58 +9,135 @@ namespace Backup.Desktop
     {
 #if UI_TEST
         public Action<string> TestMissingSourceProbe;
+        public Action<string> TestMissingSourceDirectoryRead;
 #endif
-        private void ValidateSourceMissing(string path, string root)
+        private sealed class SourceDirectoryChecks
         {
-#if UI_TEST
-            if (TestMissingSourceProbe != null)
-                TestMissingSourceProbe(path);
-#endif
-            if (string.IsNullOrWhiteSpace(root) || !Under(path, root))
-                throw new IOException("无法确认源目录，旧包保留：" + path);
-            var attributes = File.GetAttributes(root);
-            if ((attributes & FileAttributes.Directory) == 0 || (attributes & FileAttributes.ReparsePoint) != 0)
-                throw new IOException("源目录不可访问，旧包保留：" + root);
-            bool missing = false;
-            try
+            private enum DirectoryState { Present, Missing, Unavailable }
+
+            private readonly DesktopBackend backend;
+            private readonly Dictionary<string, DirectoryState> directories = new Dictionary<string, DirectoryState>(StringComparer.OrdinalIgnoreCase);
+            private readonly Dictionary<string, HashSet<string>> listings = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+
+            internal SourceDirectoryChecks(DesktopBackend owner)
             {
-                File.GetAttributes(path);
-            }
-            catch (FileNotFoundException)
-            {
-                missing = true;
-            }
-            catch (DirectoryNotFoundException)
-            {
-                missing = true;
+                backend = owner;
             }
 
-            if (!missing)
-                throw new IOException("源文件已重新出现，旧包保留：" + path);
-            // Attribute results alone can be cached by SMB. A successful, nonrecursive
-            // directory read is also required before interpreting an absent path as deletion.
-            for (string parent = Path.GetDirectoryName(path); !string.IsNullOrEmpty(parent) && Under(parent, root); parent = Path.GetDirectoryName(parent))
+            internal bool IsMissing(string path, string root)
             {
+#if UI_TEST
+                if (backend.TestMissingSourceProbe != null)
+                    backend.TestMissingSourceProbe(path);
+#endif
+                if (string.IsNullOrWhiteSpace(root) || !Path.IsPathRooted(path))
+                    return false;
+                root = StoragePath.NormalizeRoot(root);
+                string directory = Path.GetDirectoryName(Path.GetFullPath(path));
+                if (directory == null)
+                    return false;
+                directory = StoragePath.NormalizeRoot(directory);
+                if (!Under(directory, root) || ObserveDirectory(root, root) != DirectoryState.Present)
+                    return false;
+                var state = ObserveDirectory(directory, root);
+                if (state == DirectoryState.Missing)
+                    return true;
+                if (state != DirectoryState.Present)
+                    return false;
+                var names = ReadNames(directory);
+                return names != null && !names.Contains(Path.GetFileName(path));
+            }
+
+            private DirectoryState ObserveDirectory(string folder, string root)
+            {
+                DirectoryState state;
+                if (!directories.TryGetValue(folder, out state))
+                {
+                    state = ProbeDirectory(folder, root);
+                    directories.Add(folder, state);
+                }
+                return state;
+            }
+
+            private DirectoryState ProbeDirectory(string folder, string root)
+            {
+                string parent = string.Equals(folder, root, StringComparison.OrdinalIgnoreCase)
+                    ? null : StoragePath.NormalizeRoot(Path.GetDirectoryName(folder));
+                if (parent != null)
+                {
+                    var parentState = ObserveDirectory(parent, root);
+                    if (parentState != DirectoryState.Present)
+                        return parentState;
+                    HashSet<string> names;
+                    if (listings.TryGetValue(parent, out names))
+                        if (names == null || !names.Contains(Path.GetFileName(folder)))
+                            return names == null ? DirectoryState.Unavailable : DirectoryState.Missing;
+                }
+
                 try
                 {
-                    attributes = File.GetAttributes(parent);
-                    if ((attributes & FileAttributes.Directory) == 0 || (attributes & FileAttributes.ReparsePoint) != 0)
-                        throw new IOException("源路径不可访问，旧包保留：" + parent);
-                    using (var entries = Directory.EnumerateFileSystemEntries(parent).GetEnumerator())
-                        entries.MoveNext();
-                    return;
+                    var attributes = File.GetAttributes(folder);
+                    return (attributes & FileAttributes.Directory) != 0 && (attributes & FileAttributes.ReparsePoint) == 0
+                        ? DirectoryState.Present : DirectoryState.Unavailable;
                 }
-                catch (FileNotFoundException diagnosticFailure)
+                catch (IOException error)
                 {
-                    global::Backup.Core.RuntimeDiagnostics.Record("Backup.Desktop/SourcePresence.cs:ValidateSourceMissing", diagnosticFailure);
+                    if (parent != null && (error is FileNotFoundException || error is DirectoryNotFoundException))
+                    {
+                        // A missing attribute lookup is conclusive only if a readable
+                        // parent's complete listing also lacks the directory name.
+                        var names = ReadNames(parent);
+                        if (names != null && !names.Contains(Path.GetFileName(folder)))
+                            return DirectoryState.Missing;
+                    }
+                    RuntimeDiagnostics.Record("Backup.Desktop/SourcePresence.cs:ProbeDirectory", error);
                 }
-                catch (DirectoryNotFoundException diagnosticFailure)
+                catch (UnauthorizedAccessException error)
                 {
-                    global::Backup.Core.RuntimeDiagnostics.Record("Backup.Desktop/SourcePresence.cs:ValidateSourceMissing", diagnosticFailure);
+                    RuntimeDiagnostics.Record("Backup.Desktop/SourcePresence.cs:ProbeDirectory", error);
                 }
+                return DirectoryState.Unavailable;
             }
 
-            throw new IOException("无法联网确认源文件已删除，旧包保留：" + path);
+            private HashSet<string> ReadNames(string folder)
+            {
+                HashSet<string> names;
+                if (listings.TryGetValue(folder, out names))
+                    return names;
+                try
+                {
+#if UI_TEST
+                    if (backend.TestMissingSourceDirectoryRead != null)
+                        backend.TestMissingSourceDirectoryRead(folder);
+#endif
+                    names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    var control = backend.ActiveBackup;
+                    foreach (string path in Directory.EnumerateFileSystemEntries(folder))
+                    {
+                        backend.OperationCancellation.ThrowIfCancellationRequested();
+                        if (control != null)
+                            control.Token.ThrowIfCancellationRequested();
+                        if (backend.StopRequested)
+                        {
+                            names = null;
+                            break;
+                        }
+                        names.Add(Path.GetFileName(path));
+                    }
+                }
+                catch (IOException error)
+                {
+                    RuntimeDiagnostics.Record("Backup.Desktop/SourcePresence.cs:ReadNames", error);
+                    names = null;
+                }
+                catch (UnauthorizedAccessException error)
+                {
+                    RuntimeDiagnostics.Record("Backup.Desktop/SourcePresence.cs:ReadNames", error);
+                    names = null;
+                }
+                listings.Add(folder, names);
+                return names;
+            }
         }
     }
 }

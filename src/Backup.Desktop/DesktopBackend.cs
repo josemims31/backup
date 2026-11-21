@@ -38,6 +38,8 @@ namespace Backup.Desktop
         public int TotalArchives;
         public int UploadedVolumes;
         public int UploadedCopies;
+        public int CheckedSourceDeletions;
+        public int TotalSourceDeletions;
         public long BufferedBytes;
         public long MemoryLimit;
         public bool WaitingForMemory;
@@ -393,13 +395,13 @@ namespace Backup.Desktop
             BackupNode comparedNode;
             NodeFileDatabase comparedFiles;
             var unchanged = UnchangedTaskBackup(task, indexed, out comparedNode, out comparedFiles);
+            var prepared = TakePreparedSourceList(task.Id);
             if (unchanged != null)
             {
                 if (ActiveBackup != null)
                     ActiveBackup.Checkpoint();
                 unchanged.Stopped = StopRequested;
                 unchanged.NoChanges = !StopRequested;
-                DiscardMissingSourceChecks(task.Id);
                 LastCleanup = null;
                 return unchanged;
             }
@@ -412,17 +414,13 @@ namespace Backup.Desktop
             if (task.PendingTargetReplacement)
                 throw new ArgumentException("任务仍缺少替代仓库，请先添加仓库或调整勾选目标。");
             WorkspaceMigration.ValidateTargetPolicy(task, Catalog.LoadTopology());
-            var missing = TakeMissingSourceChecks(task.Id);
             var sourcePolicy = comparedFiles == null ? null : TaskSourcePolicies(task, Catalog.CaptureNode(task.Id, "", DateTime.UtcNow));
             var result = BackupTask(indexed, task.RequiredCopies, ResolveBackupPassword(task), PreferredVolumeMiB, progress, task.Id, task.TargetIds, BackupRootLayout(task),
                 allowEmpty: true, sourcePolicy: sourcePolicy);
             if (!result.Stopped && result.Sources.Count > 0 && confirmationMonitor != null)
                 confirmationMonitor.CompletePrevious(task.Id);
             if (!result.Stopped)
-            {
-                result.RemovedFromScope = ReconcileTaskBackupScope(task);
-                result.ConfirmedDeleted += ConfirmMissingSources(task.Id, missing);
-            }
+                ReconcileBackupSources(task, prepared, result, progress);
 
             if (!result.Stopped && result.Archives.Count == 0 && result.RemovedFromScope == 0 && result.ConfirmedDeleted == 0 &&
                 CompareUnchangedBackup(Catalog.CaptureNode(task.Id, "", DateTime.UtcNow).Files, comparedFiles) != null &&
@@ -805,29 +803,12 @@ namespace Backup.Desktop
         {
             if (task.RecoveryPendingConfirmation)
                 return;
-            ConfirmMissingSources(task.Id, MissingSourceChecks(task, sources, indexed));
+            var confirmed = ConfirmMissingSources(MissingSourceChecks(task, sources, indexed));
+            if (StopRequested)
+                return;
+            Catalog.MarkDeletedPaths(task.Id, confirmed, true);
             if (collectGarbage)
                 LastCleanup = CollectGarbageDetailed(cleanupProgress, task.Id);
-        }
-
-        private bool ConfirmDeleted(string taskId, string archivePath, string path, string sourceRoot)
-        {
-            try
-            {
-                ValidateSourceMissing(path, sourceRoot);
-                Catalog.MarkDeleted(taskId, archivePath, true);
-                return true;
-            }
-            catch (IOException diagnosticFailure)
-            {
-                global::Backup.Core.RuntimeDiagnostics.Record("Backup.Desktop/DesktopBackend.cs:ConfirmDeleted", diagnosticFailure);
-            }
-            catch (UnauthorizedAccessException diagnosticFailure)
-            {
-                global::Backup.Core.RuntimeDiagnostics.Record("Backup.Desktop/DesktopBackend.cs:ConfirmDeleted", diagnosticFailure);
-            }
-
-            return false;
         }
 
         private static async System.Threading.Tasks.Task<GroupedBackupResult> CompletePreparedAsync(PreparedBackup prepared, Action<GroupedBackupResult> completed)

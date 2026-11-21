@@ -19,6 +19,8 @@ namespace Backup.Desktop
         internal string TaskScope, Topology;
         internal long CatalogStamp, InventoryStamp, RecoveryRevision;
         internal bool Completed;
+        internal BackupIntegritySummary RecordedSummary;
+        internal long RecordedSummaryStamp;
         public CleanupResult Cleanup;
         public List<string> Errors = new List<string>();
         public List<IntegrityFinding> Findings = new List<IntegrityFinding>();
@@ -118,13 +120,12 @@ namespace Backup.Desktop
                     if (expected != null)
                         item = choices.FirstOrDefault(e => e.Size == expected.Size) ?? item;
                 }
-                if (item.Size < 0)
-                    throw new IOException("仓库没有提供有效文件大小。");
                 return new RemoteObjectInfo
                 {
                     Name = name,
                     Exists = true,
-                    Size = item.Size
+                    Size = item.Size,
+                    UnavailableReason = item.Size < 0 ? "仓库没有提供有效文件大小。" : null
                 };
             }
 
@@ -141,13 +142,13 @@ namespace Backup.Desktop
                     failedFolders = folders.Where(pair => pair.Value.Entries == null).ToList();
                 foreach (var failed in failedFolders)
                     if (IsInDirectory(directory, failed.Key, filesystem))
-                        throw new IOException(failed.Value.Record.Error);
+                        return new RemoteObjectInfo { Name = name, UnavailableReason = failed.Value.Record.Error };
             }
-            if (!folders.TryGetValue(FolderKey(destination.Location, filesystem), out observed) || observed.Entries == null)
-                throw new IOException("仓库暂不可访问，保留上次记录。");
             return new RemoteObjectInfo
             {
-                Name = name
+                Name = name,
+                UnavailableReason = !folders.TryGetValue(FolderKey(destination.Location, filesystem), out observed) || observed.Entries == null
+                    ? "仓库暂不可访问，保留上次记录。" : null
             };
         }
 
@@ -311,7 +312,8 @@ namespace Backup.Desktop
                 .ToList();
             result.ObsoleteIds.UnionWith(Catalog.ObsoleteOwnedArchiveIds(archiveTasks));
             var interrupted = Catalog.InterruptedArchives(archiveTasks);
-            var knownCopies = taskIds == null ? null : archives.SelectMany(archive => Catalog.GetCopies(archive.ArchiveId)).ToLookup(copy => copy.DestinationId);
+            var knownCopies = taskIds == null ? null : Catalog.GetIntegrityCopies(archives.Select(archive => archive.ArchiveId))
+                .SelectMany(copies => copies).ToLookup(copy => copy.DestinationId);
             var members = taskIds == null 
                 ? null 
                 : new HashSet<string>(knownCopies.Select(copies => copies.Key)
@@ -454,19 +456,36 @@ namespace Backup.Desktop
                     return adapter;
                 }
                 );
+            if (report != null)
+                report("正在核对待确认上传");
             result.Findings.AddRange(CheckPendingUploads(archiveTasks, false, result.ObsoleteIds, true, formalOnly));
             var engine = new GroupedBackupEngine(Catalog, adapters, Path.Combine(BaseDirectory, "7za.dll"));
             var definitions = topology.Destinations.ToDictionary(d => d.Id);
-            foreach (var archive in archives.Where(item => !result.ObsoleteIds.Contains(item.ArchiveId)))
+            var compared = archives.Where(item => !result.ObsoleteIds.Contains(item.ArchiveId)).ToList();
+            var registered = Catalog.GetIntegrityCopies(compared.Select(archive => archive.ArchiveId));
+            var observations = new List<IntegrityObservation>();
+            for (int index = 0; index < compared.Count; index++)
             {
+                OperationCancellation.ThrowIfCancellationRequested();
+                if (ActiveBackup != null)
+                    ActiveBackup.Checkpoint();
+                var archive = compared[index];
                 if (report != null)
-                    report("正在比对文件列表：" + archive.ArchiveName);
-                result.Findings.AddRange(engine.CheckIntegrity(archive.ArchiveId, Catalog.GetCopies(archive.ArchiveId), definitions, OperationCancellation));
+                    report("正在比对文件列表：" + archive.ArchiveName + " · " + (index + 1) + " / " + compared.Count);
+                result.Findings.AddRange(engine.CheckIntegrity(archive.ArchiveId, registered[archive.ArchiveId], definitions, OperationCancellation, observations.Add));
+                // Commit small batches so other local database readers can proceed.
+                if (index % 32 == 31 || index == compared.Count - 1)
+                {
+                    Catalog.RecordIntegrityBatch(observations, OperationCancellation);
+                    observations.Clear();
+                }
             }
 
             result.Findings.AddRange(CheckInterruptedBackups(adapters, archiveTasks, report));
             if (!formalOnly)
                 result.Findings.AddRange(CheckOwnedTemporaryFiles(adapters, archiveTasks, result.ObsoleteIds));
+            if (report != null)
+                report("正在汇总完整性检查结果");
             CompleteIntegrityReview(result, snapshots, topology, false);
             if (taskIds == null && result.Errors.Count == 0 &&
                 !result.Findings.Any(f => f.Status.StartsWith("unavailable", StringComparison.Ordinal) || f.Status == "confirmation-pending"))
@@ -488,6 +507,44 @@ namespace Backup.Desktop
             return RunOperationAsync(OperationKind.Check, () => CheckAllBackupsCoreAsync(taskIds));
         }
 
+        private async Task<AllBackupCheckResult> ReadIntegrityCheckAsync(IList<string> taskIds, bool summarize = false)
+        {
+            var progress = OperationReporter("");
+            var interval = System.Diagnostics.Stopwatch.StartNew();
+            string lastPhase = null;
+            Action<string> report = message =>
+            {
+                int separator = message.IndexOf('：');
+                string phase = separator < 0 ? message : message.Substring(0, separator);
+                if (phase == lastPhase && interval.ElapsedMilliseconds < 1000)
+                    return;
+                lastPhase = phase;
+                interval.Restart();
+                progress(message);
+            };
+            historySummaryActive = false;
+            deferIntegrityPresentation = true;
+            try
+            {
+                return await Task.Run(() =>
+                {
+                    var result = Backend.CheckAllBackups(report, taskIds);
+                    if (summarize)
+                    {
+                        var catalog = Backend.Catalog;
+                        result.RecordedSummaryStamp = catalog.DataChangeStamp;
+                        result.RecordedSummary = catalog.GetRecordedIntegritySummary(taskIds == null ? null : new HashSet<string>(taskIds),
+                            ObservedRecoveryObjects(catalog, result), Backend.CanRebuildFileArchiveFromPeers);
+                    }
+                    return result;
+                });
+            }
+            finally
+            {
+                deferIntegrityPresentation = false;
+            }
+        }
+
         private async Task<IList<IntegrityFinding>> CheckAllBackupsCoreAsync(IList<string> taskIds = null)
         {
             if (busy)
@@ -496,21 +553,11 @@ namespace Backup.Desktop
             if (disposed || closeAfterWork)
                 return new List<IntegrityFinding>();
             SetBusy(true, false, "正在检查全部备份完整性…");
-            var progress = OperationReporter("");
-            long lastTick = 0;
-            Action<string> report = message =>
-            {
-                long now = DateTime.UtcNow.Ticks;
-                if (now - lastTick < TimeSpan.TicksPerMillisecond * 120)
-                    return;
-                lastTick = now;
-                progress(message);
-            };
             Text("HistoryCheckSummary").Visibility = System.Windows.Visibility.Visible;
             SetHistoryCheckText("正在检查备份完整性…", OperationState.Running);
             try
             {
-                var result = await Task.Run(() => Backend.CheckAllBackups(report, taskIds));
+                var result = await ReadIntegrityCheckAsync(taskIds, true);
                 operationGeneration++;
                 ApplyCommittedChanges();
                 string text = "检查完成：读取 " + result.Folders + " 个目录、" + result.Entries + " 项，核对 " + result.Findings.Count(f => !f.ArchiveLevel && f.ArchiveId > 0) + " 个分卷副本；" + result.RepairItems +
@@ -534,7 +581,7 @@ namespace Backup.Desktop
                     ? OperationState.Attention 
                     : OperationState.Succeeded;
                 SetOperationText(message, state, false);
-                PublishHistoryCheckSummary(taskIds, result.Errors.Count);
+                PublishHistoryCheckSummary(taskIds, result.Errors.Count, counts: result.RecordedSummary, stamp: result.RecordedSummaryStamp);
                 Log(message, state);
                 OperationProgress(100, false);
                 return result.Findings;

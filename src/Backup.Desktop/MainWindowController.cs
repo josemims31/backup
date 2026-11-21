@@ -1166,13 +1166,17 @@ namespace Backup.Desktop
             var control = Backend.ActiveBackup;
             if (repairingBackups && control != null && control.IsStopping)
                 return;
-            Control<ProgressBar>("JobProgress").Value = progress.TotalBytes == 0 ? 0 : Math.Min(99, 100.0 * progress.ReadBytes / progress.TotalBytes);
+            Control<ProgressBar>("JobProgress").Value = progress.TotalSourceDeletions > 0
+                ? Math.Min(99, 100.0 * progress.CheckedSourceDeletions / progress.TotalSourceDeletions)
+                : progress.TotalBytes == 0 ? 0 : Math.Min(99, 100.0 * progress.ReadBytes / progress.TotalBytes);
             if (!string.IsNullOrEmpty(progress.UploadAlert) && progress.UploadAlert.StartsWith("上传结果待确认", StringComparison.Ordinal))
                 ShowUploadAlert(progress.UploadAlert);
             if (control != null && !control.IsStopping && (Backend.StopRequested || control.IsFinishing))
                 SetOperationText("已停止读取 · " + progress.Message);
             else if (control == null || !control.IsPaused && !control.IsStopping)
                 SetOperationText(progress.Message);
+            if (progress.TotalSourceDeletions > 0)
+                return;
             Text("BackupMetrics").Text = "已上传压缩包 " + progress.UploadedVolumes + " 个 · 缓冲 " + StatusBytes(progress.BufferedBytes) + " / " + StatusBytes(progress.MemoryLimit) + " · 已读 " +
                 StatusBytes(progress.ReadBytes) +
                 " / " +

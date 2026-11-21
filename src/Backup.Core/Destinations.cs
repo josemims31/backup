@@ -17,6 +17,7 @@ namespace Backup.Core
         public string Name;
         public bool Exists;
         public long Size;
+        public string UnavailableReason;
     }
 
     public sealed class InvalidBackupObjectException : IOException
@@ -743,6 +744,14 @@ namespace Backup.Core
                     cancellation.ThrowIfCancellationRequested();
                     RemoteObjectInfo remote = destination.Stat(item.Name);
                     cancellation.ThrowIfCancellationRequested();
+                    if (remote.UnavailableReason != null)
+                    {
+                        findings.Add(new IntegrityFinding {
+                            Destination = destination.Id, Name = item.Name, ExpectedSize = item.Size, ActualSize = -1,
+                            Status = "unavailable: " + remote.UnavailableReason
+                        });
+                        continue;
+                    }
                     bool bad = !remote.Exists || remote.Name != item.Name || remote.Size != item.Size;
                     findings.Add(new IntegrityFinding {
                         Destination = destination.Id,

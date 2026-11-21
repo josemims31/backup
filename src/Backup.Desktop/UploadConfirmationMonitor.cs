@@ -51,7 +51,7 @@ namespace Backup.Desktop
         private IList<IntegrityFinding> CheckPendingUploads(ISet<string> tasks = null, bool recoverOwnedTemporary = false, ISet<long> excluded = null, bool observeOnly = false, bool formalOnly = false)
         {
             ISet<long> ids = tasks == null ? null : new HashSet<long>(tasks.SelectMany(id => Catalog.ArchiveIdsForTask(id)));
-            if (excluded != null)
+            if (excluded != null && excluded.Count > 0)
             {
                 if (ids == null)
                     ids = new HashSet<long>(Catalog.ListArchives(true).Select(item => item.ArchiveId));
