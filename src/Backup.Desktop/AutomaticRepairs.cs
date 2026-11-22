@@ -10,7 +10,7 @@ namespace Backup.Desktop
     {
         private ISet<long> AwaitingUploadArchiveIds()
         {
-            return new HashSet<long>(Catalog.PendingVolumeTransfers().Where(item => !item.ConfirmationDamaged && !item.MetadataMatched && !item.Phase.StartsWith("repair-", StringComparison.Ordinal) &&
+            return new HashSet<long>(Catalog.PendingVolumeTransfers().Where(item => item.AwaitingConfirmation || !item.ConfirmationDamaged && !item.MetadataMatched && !item.Phase.StartsWith("repair-", StringComparison.Ordinal) &&
                 item.Phase != "checking")
                 .Select(item => item.ArchiveId));
         }
@@ -138,25 +138,31 @@ namespace Backup.Desktop
             Backend.BeginBackup();
             repairingBackups = true;
             SetBusy(true, true, "任务计划：检查备份完整性…");
-            var report = OperationReporter("");
             Text("HistoryCheckSummary").Visibility = System.Windows.Visibility.Visible;
             SetHistoryCheckText("正在检查计划关联任务…", OperationState.Running);
             try
             {
                 var result = await ReadIntegrityCheckAsync(taskIds);
                 var scope = new HashSet<string>(taskIds);
-                int before = Backend.KnownRepairArchives(Workspace, scope).Count;
                 SetBusy(true, true, "任务计划：修复备份完整性…");
+                var report = OperationReporter("", true);
                 SetHistoryCheckText("检查已完成，正在修复计划关联任务…", OperationState.Running);
-                var errors = result.Errors.ToList();
-                errors.AddRange(await Task.Run(() => Backend.RepairCheckedBackups(Workspace, scope, report)));
+                var repair = await RunIntegrityRepairWorkAsync(() =>
+                {
+                    int before = Backend.KnownRepairArchives(Workspace, scope).Count;
+                    var repairErrors = Backend.RepairCheckedBackups(Workspace, scope, report).ToList();
+                    foreach (var archive in Backend.KnownRepairArchives(Workspace, scope))
+                        if (!repairErrors.Any(error => error.StartsWith("#" + archive.ArchiveId.ToString("D8"))))
+                            repairErrors.Add("#" + archive.ArchiveId.ToString("D8") + "：仍有异常副本，保留待重试。");
+                    return Tuple.Create(repairErrors, before, ReadIntegritySummary(taskIds, Backend.LastIntegrityReview));
+                });
+                var errors = repair.Item1;
                 Backend.ActiveBackup.Checkpoint(false);
-                foreach (var archive in Backend.KnownRepairArchives(Workspace, scope))
-                    if (!errors.Any(error => error.StartsWith("#" + archive.ArchiveId.ToString("D8"))))
-                        errors.Add("#" + archive.ArchiveId.ToString("D8") + "：仍有异常副本，保留待重试。");
-                string summary = errors.Count == 0 ? "检查完成：已自动修复 " + before + " 个异常备份包。" : "操作未完成：检查与自动修复结束，以下项目待重试：\n" + string.Join("\n", errors);
+                operationGeneration++;
+                string summary = errors.Count == 0 ? "检查完成：已自动修复 " + repair.Item2 + " 个异常备份包。" : "操作未完成：检查与自动修复结束，以下项目待重试：\n" + string.Join("\n", errors);
                 ApplyCommittedChanges();
-                PublishHistoryCheckSummary(taskIds, result.Errors.Count, errors.Count);
+                var review = Backend.LastIntegrityReview;
+                PublishHistoryCheckSummary(taskIds, review == null ? result.Errors.Count : review.Errors.Count, errors.Count, repair.Item3.Item1, repair.Item3.Item2);
                 SetOperationText(summary, errors.Count == 0 ? OperationState.Succeeded : OperationState.Failed);
                 Log(summary);
                 OperationProgress(100, false);

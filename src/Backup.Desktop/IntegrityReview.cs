@@ -17,7 +17,7 @@ namespace Backup.Desktop
             var review = lastIntegrityReview;
             if (review == null || !review.Completed || !review.Directories.TryGetValue(destination.Id, out folders))
                 return null;
-            var result = new Dictionary<string, IList<StorageEntry>>();
+            var result = new Dictionary<string, IList<StorageEntry>>(RepositoryModules.IsFileSystem(destination.Protocol) ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
             long stamp = Catalog.InventoryChangeStamp;
             foreach (string folder in folders)
             {
@@ -27,7 +27,10 @@ namespace Backup.Desktop
                 result[ObjectStoragePath.Relative(destination, folder)] = read.Entries;
             }
 
-            return result;
+            // A partial inspection is useful for repair review but cannot prove
+            // that a same-named file is absent below an unobserved child folder.
+            return result.ContainsKey("") && result.Values.SelectMany(entries => entries).Where(item => item.Directory)
+                .All(item => !string.IsNullOrEmpty(item.Location) && result.ContainsKey(ObjectStoragePath.Relative(destination, item.Location))) ? result : null;
         }
 
         internal AllBackupCheckResult LastIntegrityReview
@@ -458,7 +461,6 @@ namespace Backup.Desktop
                 TaskIds = original.TaskIds,
                 InventoryStamp = stamp
             };
-            result.Errors.AddRange(original.Errors);
             result.ObsoleteIds.UnionWith(Catalog.ObsoleteOwnedArchiveIds(scope));
             result.ObsoleteIds.UnionWith(original.ObsoleteIds.Where(id => Catalog.GetArchive(id).Status != "cleaned" && !Catalog.ArchiveHasCurrentFiles(id)));
             var snapshots = new Dictionary<string, Dictionary<string, WarehouseDirectoryRead>>();
@@ -492,6 +494,7 @@ namespace Backup.Desktop
 
                 // A previous listing below a newly failed directory is stale.
                 var failed = records.Where(folder => folder.Value.Entries == null).ToList();
+                result.Errors.AddRange(failed.Select(folder => folder.Value.Record.Folder + "：" + folder.Value.Record.Error));
                 if (failed.Count > 0)
                     foreach (string key in records.Where(folder => folder.Value.Entries != null && failed.Any(parent =>
                         InventoryMetadataDestination.IsInDirectory(folder.Key, parent.Key, local) &&
@@ -503,6 +506,47 @@ namespace Backup.Desktop
 
             CompleteIntegrityReview(result, snapshots, topology, checkTaskTargets, registeredObjects);
             return result;
+        }
+
+        private bool RetryFailedRepairDirectories(AllBackupCheckResult review, StorageTopology topology, Action<string> report)
+        {
+            if (review.Errors.Count == 0)
+                return false;
+            string stamp = DateTime.UtcNow.ToString("o");
+            long inventoryStamp = Catalog.InventoryChangeStamp;
+            foreach (var definition in topology.Destinations)
+            {
+                List<string> folders;
+                if (!review.Directories.TryGetValue(definition.Id, out folders))
+                    continue;
+                bool local = RepositoryModules.IsFileSystem(definition.Protocol);
+                var blocked = new List<string>();
+                foreach (string folder in folders.OrderBy(item => item.Length))
+                {
+                    OperationCancellation.ThrowIfCancellationRequested();
+                    string key = InventoryMetadataDestination.FolderKey(folder, local);
+                    if (blocked.Any(parent => InventoryMetadataDestination.IsInDirectory(key, parent, local)))
+                        continue;
+                    var read = ReadReviewDirectory(definition.Id, folder, inventoryStamp);
+                    if (read == null || read.Entries != null)
+                        continue;
+                    if (report != null)
+                        report("正在重新核对未读取的目录：" + folder);
+                    try
+                    {
+                        directoryRefresh.RetryFailedFolder(folder);
+                        ReadWarehouseDirectory(definition.Id, folder, OperationCancellation, false, stamp, false, definition);
+                    }
+                    catch (Exception error)
+                    {
+                        if (!(error is IOException) && !(error is UnauthorizedAccessException) && !(error is NotSupportedException))
+                            throw;
+                        RuntimeDiagnostics.Record("Backup.Desktop/IntegrityReview.cs:RetryFailedRepairDirectories", error);
+                        blocked.Add(key);
+                    }
+                }
+            }
+            return true;
         }
 
         private AllBackupCheckResult ReviewLocalInventory(ISet<string> taskIds, StorageTopology topology)
@@ -603,7 +647,7 @@ namespace Backup.Desktop
                 item.RepairAction == "clear-absent-record" ||
                 item.RepairAction == "remove-obsolete-registration" ||
                 item.Status.StartsWith("unavailable", StringComparison.Ordinal)) &&
-                !(item.RepairAction == "delete-orphan" &&
+                !item.UploadConfirmation && !(item.RepairAction == "delete-orphan" &&
                 BackupObjectNaming.IsTemporary(item.Name)))
                 .ToList())
             {
@@ -778,7 +822,6 @@ namespace Backup.Desktop
 
                 bool taskDeletesAttempted;
                 var taskDeleteErrors = RetryTaskDirectoryDeletes(taskIds, report, out taskDeletesAttempted);
-                var temporaryErrors = DiscardInactiveUploadTemporaries(taskIds, report, OperationCancellation);
                 Catalog.UnregisterAbandonedArchiveOutputs(taskIds, ActiveBackup == null ? null : new HashSet<long>(ActiveBackup.ArchiveIds));
                 Catalog.UnregisterDeletedLocalNodeData(taskIds);
                 var pendingRepairs = PendingRepairs();
@@ -791,6 +834,8 @@ namespace Backup.Desktop
                 if (review == null || !review.Completed || review.TaskScope != ReviewScope(taskIds) || review.Topology != JsonSettings.Encode(topology))
                     review = ReviewLocalInventory(taskIds, topology);
                 else if (taskDeletesAttempted || review.RecoveryRevision != Catalog.RecoveryRevision)
+                    review = ReviewCommittedInventory(review, topology, checkTaskTargets: false);
+                if (RetryFailedRepairDirectories(review, topology, report))
                     review = ReviewCommittedInventory(review, topology, checkTaskTargets: false);
                 var policyErrors = new List<string>();
                 ReviewLatestTaskTargets(review, topology, workspace, latest =>
@@ -816,8 +861,9 @@ namespace Backup.Desktop
                 errors.AddRange(policyErrors);
                 errors.AddRange(rotationErrors);
                 errors.AddRange(taskDeleteErrors);
-                errors.AddRange(temporaryErrors);
-                QueuePendingUploadDamage(workspace, CheckPendingUploads(taskIds, true, review.ObsoleteIds, false, true));
+                var uploadFindings = CheckPendingUploads(taskIds, true, review.ObsoleteIds, false, true);
+                QueuePendingUploadDamage(workspace, uploadFindings);
+                errors.AddRange(DiscardInactiveUploadTemporaries(taskIds, report, OperationCancellation));
                 review.ObsoleteIds.RemoveWhere(id => Catalog.ArchiveHasCurrentFiles(id));
                 foreach (long id in review.ObsoleteIds)
                     try
@@ -846,6 +892,7 @@ namespace Backup.Desktop
                 var repairIds = new HashSet<long>(review.Findings.Where(item => item.ArchiveId > 0 && item.RequiresManualRepairConfirmation && !review.ObsoleteIds.Contains(item.ArchiveId) &&
                     !detailedArchives.Contains(item.ArchiveId))
                     .Select(item => item.ArchiveId));
+                repairIds.UnionWith(uploadFindings.Where(item => item.RepairAction == "replace" && !detailedArchives.Contains(item.ArchiveId)).Select(item => item.ArchiveId));
                 errors.AddRange(RunConfirmedRepairs(workspace, report, IntegrityTaskIds(taskIds), progress, cleanupProgress, false, true, repairIds, false, true));
                 // Reclassify entries exposed by intent cleanup or unregistration using
                 // committed inventory changes, without repeating directory enumeration.

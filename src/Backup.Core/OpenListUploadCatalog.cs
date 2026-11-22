@@ -97,5 +97,11 @@ namespace Backup.Core
                 );
             }
         }
+
+        public bool HasUnresolvedOpenListUpload(string destination, string name)
+        {
+            lock (gate)
+                return Scalar("SELECT count(*) FROM openlist_upload_tasks WHERE destination_id=? AND name=? AND state NOT IN ('failed','canceled','not-found')", destination, name) > 0;
+        }
     }
 }

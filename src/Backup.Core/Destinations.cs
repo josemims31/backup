@@ -733,8 +733,55 @@ namespace Backup.Core
 
     public static class DestinationIntegrityChecker
     {
+        public static IList<IntegrityFinding> CheckRecordedFolders(IBackupDestination destination, IEnumerable<ObjectRecord> objects, CancellationToken cancellation)
+        {
+            var located = destination as LocatedBackupDestination;
+            if (located == null)
+                return Check(destination, objects, cancellation);
+            var findings = new List<IntegrityFinding>();
+            foreach (var folder in objects.GroupBy(item => located.RecordedFolder(item.Name)))
+            {
+                cancellation.ThrowIfCancellationRequested();
+                try
+                {
+                    var entries = folder.Count() < 3 ? null : located.ReadRecordedDirectory(folder.Key, false);
+                    if (entries == null)
+                    {
+                        findings.AddRange(Check(destination, folder, cancellation));
+                        continue;
+                    }
+                    var files = entries.ToLookup(entry => entry.Name, located.RecordedNameComparer);
+                    findings.AddRange(Check(destination.Id, folder, name =>
+                    {
+                        var matches = files[name];
+                        var entry = matches.FirstOrDefault();
+                        if (entry == null)
+                            return destination.Stat(name);
+                        if (entry.Directory || matches.Skip(1).Any())
+                            throw new InvalidBackupObjectException("备份文件类型无效或存在同名项目。");
+                        return new RemoteObjectInfo { Name = name, Exists = true, Size = entry.Size, UnavailableReason = entry.Size < 0 ? "未取得文件大小。" : null };
+                    }, cancellation));
+                }
+                catch (Exception error)
+                {
+                    if (!(error is IOException) && !(error is UnauthorizedAccessException) && !(error is NotSupportedException))
+                        throw;
+                    RuntimeDiagnostics.Record("DestinationIntegrityChecker:CheckRecordedFolders", error);
+                    findings.AddRange(folder.Select(item => new IntegrityFinding {
+                        Destination = destination.Id, Name = item.Name, ExpectedSize = item.Size, ActualSize = -1, Status = "unavailable: " + error.Message
+                    }));
+                }
+            }
+            return findings;
+        }
+
         // Deliberately has no upload/delete API and never opens object content.
         public static IList<IntegrityFinding> Check(IBackupDestination destination, IEnumerable<ObjectRecord> objects, System.Threading.CancellationToken cancellation = default(System.Threading.CancellationToken))
+        {
+            return Check(destination.Id, objects, destination.Stat, cancellation);
+        }
+
+        private static IList<IntegrityFinding> Check(string destination, IEnumerable<ObjectRecord> objects, Func<string, RemoteObjectInfo> stat, CancellationToken cancellation)
         {
             List<IntegrityFinding> findings = new List<IntegrityFinding>();
             foreach (ObjectRecord item in objects)
@@ -742,19 +789,19 @@ namespace Backup.Core
                 try
                 {
                     cancellation.ThrowIfCancellationRequested();
-                    RemoteObjectInfo remote = destination.Stat(item.Name);
+                    RemoteObjectInfo remote = stat(item.Name);
                     cancellation.ThrowIfCancellationRequested();
                     if (remote.UnavailableReason != null)
                     {
                         findings.Add(new IntegrityFinding {
-                            Destination = destination.Id, Name = item.Name, ExpectedSize = item.Size, ActualSize = -1,
+                            Destination = destination, Name = item.Name, ExpectedSize = item.Size, ActualSize = -1,
                             Status = "unavailable: " + remote.UnavailableReason
                         });
                         continue;
                     }
                     bool bad = !remote.Exists || remote.Name != item.Name || remote.Size != item.Size;
                     findings.Add(new IntegrityFinding {
-                        Destination = destination.Id,
+                        Destination = destination,
                         Name = item.Name,
                         ExpectedSize = item.Size,
                         ActualSize = remote.Size,
@@ -769,7 +816,7 @@ namespace Backup.Core
                 catch (InvalidBackupObjectException)
                 {
                     findings.Add(new IntegrityFinding {
-                        Destination = destination.Id,
+                        Destination = destination,
                         Name = item.Name,
                         ExpectedSize = item.Size,
                         ActualSize = -1,
@@ -782,7 +829,7 @@ namespace Backup.Core
                     global::Backup.Core.RuntimeDiagnostics.Record("Backup.Core/Destinations.cs:Check", e);
                     cancellation.ThrowIfCancellationRequested();
                     findings.Add(new IntegrityFinding {
-                        Destination = destination.Id,
+                        Destination = destination,
                         Name = item.Name,
                         ExpectedSize = item.Size,
                         ActualSize = -1,

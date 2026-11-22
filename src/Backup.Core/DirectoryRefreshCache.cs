@@ -182,6 +182,19 @@ namespace Backup.Core
                 }
         }
 
+        // Explicit repair may retry a failed observation after connectivity returns.
+        // Keep the normal minimum interval and any in-flight request.
+        public void RetryFailedFolder(string folder)
+        {
+            string path = Folder(folder);
+            List<Entry> matches;
+            lock (gate)
+                matches = entries.Values.Where(entry => entry.Folder == path).ToList();
+            foreach (var entry in matches)
+                lock (entry.Gate)
+                    entry.Error = null;
+        }
+
         public void Clear()
         {
             List<Entry> old;

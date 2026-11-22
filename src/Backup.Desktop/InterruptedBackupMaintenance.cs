@@ -22,7 +22,7 @@ namespace Backup.Desktop
             adapters.Cancellation = cancellation;
             // Keep the old native context until formal-file confirmation has run.
             // A stale DAV cache must not hide an already completed cloud object.
-            if (stages.Count > 0)
+            if (archiveIds != null && stages.Count > 0)
                 new PendingUploadConfirmation(Catalog, adapters).Check(new HashSet<long>(stages.Select(item => item.ArchiveId)), cancellation, ReportUploadConfirmation, false, false, false, false, true);
             using (adapters.BeginScope())
                 foreach (var stage in stages)
@@ -36,6 +36,10 @@ namespace Backup.Desktop
                             throw new IOException("原仓库配置已不存在，无法删除远程临时文件。");
                         var names = Catalog.UploadStages(stage.DestinationId, stage.Name);
                         if (names.Count == 0)
+                            continue;
+                        // A foreground repair has already checked the formal file
+                        // and must leave unresolved native tasks with their owner.
+                        if (archiveIds == null && Catalog.HasUnresolvedOpenListUpload(stage.DestinationId, stage.Name))
                             continue;
                         if (report != null)
                             report("正在删除停止后遗留的临时文件：" + stage.Name);
@@ -270,7 +274,9 @@ namespace Backup.Desktop
                             var cancel = adapter as ICancellableBackupDestination;
                             if (cancel != null)
                                 cancel.OperationCancellation = ActiveBackup == null ? OperationCancellation : ActiveBackup.Token;
-                            findings.AddRange(DestinationIntegrityChecker.Check(adapter, group.Select(copy => copy.Object), ActiveBackup == null ? OperationCancellation : ActiveBackup.Token));
+                            var token = ActiveBackup == null ? OperationCancellation : ActiveBackup.Token;
+                            var objects = group.Select(copy => copy.Object);
+                            findings.AddRange(applyCorrections ? DestinationIntegrityChecker.CheckRecordedFolders(adapter, objects, token) : DestinationIntegrityChecker.Check(adapter, objects, token));
                         }
                         catch (OperationCanceledException)
                         {

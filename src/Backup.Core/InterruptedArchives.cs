@@ -276,9 +276,6 @@ namespace Backup.Core
                 if (Control != null)
                     Control.Checkpoint(false);
                 cancellation.ThrowIfCancellationRequested();
-                // Foreground repair has no whole-archive deadline. Each remote
-                // request already has its own timeout. Stop cleanup passes its
-                // independently bounded CleanupToken from BackupControl.
                 if (catalog.IsNodeArchive(id))
                 {
                     errors.Add("已被备份版本使用的归档不能按未完成上传删除，请检测完整性并从健康副本修复。");
@@ -286,7 +283,9 @@ namespace Backup.Core
                 }
 
                 var archive = catalog.GetArchive(id);
-                if (catalog.PendingVolumeTransfers().Any(item => item.ArchiveId == id && item.AwaitingConfirmation))
+                var transfers = catalog.PendingVolumeTransfers().Where(item => item.ArchiveId == id).ToList();
+                var stages = catalog.PendingUploadStages().Where(item => item.ArchiveId == id).ToList();
+                if (transfers.Any(item => item.AwaitingConfirmation) || stages.Any(item => catalog.HasUnresolvedOpenListUpload(item.DestinationId, item.Name)))
                 {
                     errors.Add(archive.ArchiveName + "：仍有上传结果待确认，已保留原目标及临时文件，请稍后继续核对。");
                     return errors;
@@ -306,23 +305,27 @@ namespace Backup.Core
                 if (whole && catalog.HasCompleteArchiveManifest(id))
                 {
                     var confirmed = new List<IntegrityFinding>();
-                    foreach (var pending in catalog.PendingVolumeTransfers().Where(item => item.ArchiveId == id && item.Phase == "committing"))
+                    foreach (var pending in transfers.Where(item => item.Phase == "committing").ToList())
                     {
                         IManagedBackupDestination target = null;
                         try
                         {
-                            target = adapters.CreateTransfer(operationDefinitions[pending.Placement.DestinationId]) as IManagedBackupDestination;
+                            DestinationDefinition definition;
+                            if (!operationDefinitions.TryGetValue(pending.Placement.DestinationId, out definition))
+                                throw new IOException("原仓库配置已不存在，保留上传核对记录。");
+                            target = adapters.CreateTransfer(definition) as IManagedBackupDestination;
                             if (target == null)
                                 throw new NotSupportedException("仓库无法核对提交结果。");
                             var cancel = target as ICancellableBackupDestination;
                             if (cancel != null)
                                 cancel.OperationCancellation = timeout.Token;
-                            var info = target.Stat(pending.Object.Name);
+                            var info = CleanupRequest(target, timeout.Token, () => target.Stat(pending.Object.Name));
                             if (!info.Exists)
                                 continue;
                             if (info.Name != pending.Object.Name || info.Size != pending.Object.Size)
                                 continue;
                             catalog.ResolveVolumeTransfer(pending, true);
+                            transfers.Remove(pending);
                             confirmed.Add(new IntegrityFinding {
                                 RepairApplied = true,
                                 Destination = pending.Placement.DestinationId,
@@ -338,7 +341,7 @@ namespace Backup.Core
                             cancellation.ThrowIfCancellationRequested();
                             if (Control != null)
                                 Control.Token.ThrowIfCancellationRequested();
-                            if (!(error is IOException) && !(error is UnauthorizedAccessException) && !(error is NotSupportedException) && !(error is OperationCanceledException))
+                            if (!CleanupFailure(error))
                                 throw;
                             errors.Add(pending.Object.Name + " 提交结果待核对：" + error.Message);
                         }
@@ -370,71 +373,13 @@ namespace Backup.Core
                     return errors;
                 }
 
-                var copies = catalog.GetCopies(id);
-                var transfers = catalog.PendingVolumeTransfers().Where(item => item.ArchiveId == id).ToList();
-                var stages = catalog.PendingUploadStages().Where(item => item.ArchiveId == id).ToList();
-                var selected = catalog.InterruptedCheckCopies(id).Where(item => !protect.Contains(item.DestinationId + "\0" + item.Object.Name) ||
-                    stages.Any(stage => stage.DestinationId == item.DestinationId &&
-                    stage.Name == item.Object.Name) ||
-                    transfers.Any(transfer => transfer.Placement.DestinationId == item.DestinationId &&
-                    transfer.Object.Name == item.Object.Name))
-                    .ToList();
+                var owned = new HashSet<string>(catalog.GetCopies(id).Select(CopyKey));
+                var temporary = new HashSet<string>(stages.Select(item => item.DestinationId + "\0" + item.Name));
+                var transferring = new HashSet<string>(transfers.Select(item => item.Placement.DestinationId + "\0" + item.Object.Name));
+                var selected = catalog.InterruptedCheckCopies(id).Where(item => !protect.Contains(CopyKey(item)) || temporary.Contains(CopyKey(item)) || transferring.Contains(CopyKey(item))).ToList();
                 if (selected.Count == 0 && !whole)
                     return errors;
-                foreach (var item in selected)
-                {
-                    IManagedBackupDestination target = null;
-                    try
-                    {
-                        timeout.Token.ThrowIfCancellationRequested();
-                        target = adapters.CreateTransfer(operationDefinitions[item.DestinationId]) as IManagedBackupDestination;
-                        if (target == null)
-                            throw new NotSupportedException("仓库不支持清理。");
-                        var cancellable = target as ICancellableBackupDestination;
-                        if (cancellable != null)
-                            cancellable.OperationCancellation = timeout.Token;
-                        bool owned = copies.Any(copy => copy.DestinationId == item.DestinationId && copy.Object.Name == item.Object.Name);
-                        var transfer = transfers.FirstOrDefault(value => value.Placement.DestinationId == item.DestinationId && value.Object.Name == item.Object.Name);
-                        var info = target.Stat(item.Object.Name);
-                        bool keep = protect.Contains(item.DestinationId + "\0" + item.Object.Name);
-                        if (info.Exists && !keep)
-                        {
-                            if (!owned)
-                            {
-                                if (transfer == null || transfer.Phase != "committing")
-                                    throw new IOException("远程同名文件没有已提交的所有权记录，已保留。");
-                                if (!BackupObjectNaming.IsManaged(item.Object.Name))
-                                    throw new IOException("文件名称不符合本软件备份命名规则，已保留。");
-                            }
-
-                            target.DeleteObject(item.Object.Name);
-                            if (target.Stat(item.Object.Name).Exists)
-                                throw new IOException("未完成归档未删除。");
-                            if (owned)
-                                catalog.ObjectRemoved(item.Object.Name, item.DestinationId);
-                        }
-                        else if (!info.Exists && owned && !keep)
-                            catalog.ObjectRemoved(item.Object.Name, item.DestinationId);
-                        target.DeleteTemporary(item.Object.Name);
-                        if (transfer != null)
-                            catalog.ResolveVolumeTransfer(transfer, keep);
-                    }
-                    catch (Exception error)
-                    {
-                        global::Backup.Core.RuntimeDiagnostics.Record("Backup.Core/InterruptedArchives.cs:DeleteInterruptedArchive", error);
-                        cancellation.ThrowIfCancellationRequested();
-                        if (Control != null)
-                            Control.Token.ThrowIfCancellationRequested();
-                        if (!(error is IOException) && !(error is UnauthorizedAccessException) && !(error is NotSupportedException) && !(error is OperationCanceledException))
-                            throw;
-                        errors.Add(item.Object.Name + " → " + item.DestinationId + "：" + error.Message);
-                    }
-                    finally
-                    {
-                        if (target != null)
-                            adapters.Release(target);
-                    }
-                }
+                errors.AddRange(DeleteRecordedCopies(selected, transfers, temporary, "正在清理无版本引用的未完成归档：" + archive.ArchiveName, timeout.Token, protect, owned));
 
                 if (errors.Count == 0)
                 {

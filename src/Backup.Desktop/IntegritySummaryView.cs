@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Tasks;
 using System.Windows;
 using Backup.Core;
 
@@ -45,6 +46,29 @@ namespace Backup.Desktop
         {
             historySummaryState = state;
             Text("HistoryCheckSummary").Text = message;
+        }
+
+        private Tuple<BackupIntegritySummary, long> ReadIntegritySummary(IList<string> taskIds, AllBackupCheckResult review)
+        {
+            var catalog = Backend.Catalog;
+            long stamp = catalog.DataChangeStamp;
+            var counts = catalog.GetRecordedIntegritySummary(taskIds == null ? null : new HashSet<string>(taskIds),
+                ObservedRecoveryObjects(catalog, review), Backend.CanRebuildFileArchiveFromPeers);
+            return Tuple.Create(counts, stamp);
+        }
+
+        private async Task<T> RunIntegrityRepairWorkAsync<T>(Func<T> work)
+        {
+            historySummaryActive = false;
+            deferIntegrityPresentation = true;
+            try
+            {
+                return await Task.Run(work);
+            }
+            finally
+            {
+                deferIntegrityPresentation = false;
+            }
         }
 
         private void PublishHistoryCheckSummary(IList<string> taskIds, int directoryErrors, int repairErrors = 0,

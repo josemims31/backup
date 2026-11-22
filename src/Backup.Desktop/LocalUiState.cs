@@ -131,6 +131,7 @@ namespace Backup.Desktop
                     RefreshDatabaseSavedTime();
                     RefreshTransferSpeed();
                     RefreshBackupProgress();
+                    RefreshIntegrityProgress();
                     RefreshUploadStatus();
                 }
             };

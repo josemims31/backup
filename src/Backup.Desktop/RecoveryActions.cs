@@ -133,16 +133,22 @@ namespace Backup.Desktop
             Backend.BeginBackup();
             repairingBackups = true;
             SetBusy(true, true, "正在重新整合并修复异常备份包…");
-            var report = OperationReporter("正在修复：");
+            var report = OperationReporter("正在修复：", true);
             try
             {
                 var progress = BackupReporter();
                 var cleanup = CleanupReporter();
-                var errors = await Task.Run(() => Backend.RepairCheckedBackups(Workspace, null, report, progress, cleanup));
+                var result = await RunIntegrityRepairWorkAsync(() =>
+                {
+                    var repairErrors = Backend.RepairCheckedBackups(Workspace, null, report, progress, cleanup);
+                    return Tuple.Create(repairErrors, ReadIntegritySummary(null, Backend.LastIntegrityReview));
+                });
+                var errors = result.Item1;
                 Backend.ActiveBackup.Checkpoint(false);
+                operationGeneration++;
                 ApplyCommittedChanges();
                 int failures = errors.Count(error => !error.Contains("上传结果待确认") && !error.Contains("暂不可访问") && !error.Contains("上传结果仍未核对") && !error.Contains("暂时无法核对"));
-                PublishHistoryCheckSummary(null, 0, failures);
+                PublishHistoryCheckSummary(null, 0, failures, result.Item2.Item1, result.Item2.Item2);
                 SetOperationText(
                     errors.Count == 0 ? "已确认的副本修复完成。" : failures == 0 ? "部分上传结果暂时无法核对：\n" + string.Join("\n", errors) : "操作未完成：以下项目待重试：\n" + string.Join("\n", errors),
                     errors.Count == 0 ? OperationState.Succeeded : failures == 0 ? OperationState.Attention : OperationState.Failed

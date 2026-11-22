@@ -272,7 +272,7 @@ namespace Backup.Core
                     {
                         if (!catalog.CanReconcileVolume(pending.ArchiveId))
                             continue;
-                        if (pending.AwaitingConfirmation)
+                        if (pending.AwaitingConfirmation || catalog.HasUnresolvedOpenListUpload(pending.Placement.DestinationId, pending.Object.Name))
                         {
                             errors.Add(pending.Object.Name + (pending.Placement.Status == "unavailable" ? "：仓库暂不可访问，尚无法核对上传结果。" : "：上传结果仍未核对，请稍后运行完整性检查。"));
                             continue;
@@ -289,10 +289,14 @@ namespace Backup.Core
 
                         if (pending.ConfirmationDamaged)
                         {
-                            if (target.Stat(pending.Object.Name).Exists)
+                            var info = target.Stat(pending.Object.Name);
+                            // A complete formal object can appear between observations
+                            // when the upload was committed but its response was delayed.
+                            bool matched = pending.Phase != "repair-writing" && info.Exists && info.Name == pending.Object.Name && info.Size == pending.Object.Size;
+                            if (info.Exists && !matched)
                                 target.DeleteObject(pending.Object.Name);
                             target.DeleteTemporary(pending.Object.Name);
-                            catalog.ResolveVolumeTransfer(pending, false);
+                            catalog.ResolveVolumeTransfer(pending, matched);
                             continue;
                         }
 
@@ -335,7 +339,7 @@ namespace Backup.Core
                     .TaskId == taskId)))
                     try
                     {
-                        if (catalog.CanReconcileVolume(pending.ArchiveId))
+                        if (catalog.CanReconcileVolume(pending.ArchiveId) && !catalog.HasUnresolvedOpenListUpload(pending.DestinationId, pending.Name))
                             Open(pending.DestinationId).DeleteTemporary(pending.Name);
                     }
                     catch (IOException error)
@@ -478,7 +482,8 @@ namespace Backup.Core
                         catch (Exception e)
                         {
                             global::Backup.Core.RuntimeDiagnostics.Record("Backup.Core/VolumeMaintenance.cs:MigrateVolumes", e);
-                            bool uncertain = uploaded || catalog.UploadStages(route.Placement.DestinationId, item.Name).Count > 0 || e is TransferReconciliationRequiredException;
+                            bool uncertain = uploaded || catalog.UploadStages(route.Placement.DestinationId, item.Name).Count > 0 ||
+                                e is TransferReconciliationRequiredException && !catalog.HasUnstartedVolume(item.Name, route.Placement.DestinationId);
                             catalog.FailVolumeCopy(plan, route.Placement, item, uncertain);
                             throw;
                         }

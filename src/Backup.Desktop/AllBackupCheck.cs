@@ -509,19 +509,7 @@ namespace Backup.Desktop
 
         private async Task<AllBackupCheckResult> ReadIntegrityCheckAsync(IList<string> taskIds, bool summarize = false)
         {
-            var progress = OperationReporter("");
-            var interval = System.Diagnostics.Stopwatch.StartNew();
-            string lastPhase = null;
-            Action<string> report = message =>
-            {
-                int separator = message.IndexOf('：');
-                string phase = separator < 0 ? message : message.Substring(0, separator);
-                if (phase == lastPhase && interval.ElapsedMilliseconds < 1000)
-                    return;
-                lastPhase = phase;
-                interval.Restart();
-                progress(message);
-            };
+            var report = OperationReporter("", true);
             historySummaryActive = false;
             deferIntegrityPresentation = true;
             try
@@ -531,10 +519,9 @@ namespace Backup.Desktop
                     var result = Backend.CheckAllBackups(report, taskIds);
                     if (summarize)
                     {
-                        var catalog = Backend.Catalog;
-                        result.RecordedSummaryStamp = catalog.DataChangeStamp;
-                        result.RecordedSummary = catalog.GetRecordedIntegritySummary(taskIds == null ? null : new HashSet<string>(taskIds),
-                            ObservedRecoveryObjects(catalog, result), Backend.CanRebuildFileArchiveFromPeers);
+                        var summary = ReadIntegritySummary(taskIds, result);
+                        result.RecordedSummary = summary.Item1;
+                        result.RecordedSummaryStamp = summary.Item2;
                     }
                     return result;
                 });

@@ -1166,9 +1166,10 @@ namespace Backup.Desktop
             var control = Backend.ActiveBackup;
             if (repairingBackups && control != null && control.IsStopping)
                 return;
-            Control<ProgressBar>("JobProgress").Value = progress.TotalSourceDeletions > 0
-                ? Math.Min(99, 100.0 * progress.CheckedSourceDeletions / progress.TotalSourceDeletions)
-                : progress.TotalBytes == 0 ? 0 : Math.Min(99, 100.0 * progress.ReadBytes / progress.TotalBytes);
+            if (!repairingBackups)
+                Control<ProgressBar>("JobProgress").Value = progress.TotalSourceDeletions > 0
+                    ? Math.Min(99, 100.0 * progress.CheckedSourceDeletions / progress.TotalSourceDeletions)
+                    : progress.TotalBytes == 0 ? 0 : Math.Min(99, 100.0 * progress.ReadBytes / progress.TotalBytes);
             if (!string.IsNullOrEmpty(progress.UploadAlert) && progress.UploadAlert.StartsWith("上传结果待确认", StringComparison.Ordinal))
                 ShowUploadAlert(progress.UploadAlert);
             if (control != null && !control.IsStopping && (Backend.StopRequested || control.IsFinishing))
@@ -1252,7 +1253,7 @@ namespace Backup.Desktop
                     Text("WarehouseNotice").Text = "";
                 }
 
-                OperationProgress(0, !backingUp);
+                OperationProgress(0, !backingUp || repairingBackups);
                 SetOperationText(message ?? "正在处理…");
             }
 

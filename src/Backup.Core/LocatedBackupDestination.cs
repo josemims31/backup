@@ -401,6 +401,40 @@ namespace Backup.Core
             return abandoned == null ? target.Stat(name) : abandoned.StatFormal(name);
         }
 
+        internal string RecordedFolder(string name)
+        {
+            return DirectoryFor(name);
+        }
+
+        internal StringComparer RecordedNameComparer
+        {
+            get { return RepositoryModules.IsFileSystem(destination.Protocol) ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal; }
+        }
+
+        internal IList<StorageEntry> ReadRecordedDirectory(string directory, bool fresh)
+        {
+            var session = Driver(directory) as IRepositorySession;
+            if (session == null)
+                return null;
+            try
+            {
+                return session.ListEntriesAt(ObjectStoragePath.Absolute(destination, directory), OperationCancellation, fresh);
+            }
+            catch (IOException error)
+            {
+                if (directory.Length == 0 || !Missing(error))
+                    throw;
+                int slash = directory.LastIndexOf('/');
+                string parent = slash < 0 ? "" : directory.Substring(0, slash);
+                string child = directory.Substring(slash + 1);
+                var names = RecordedNameComparer;
+                var siblings = ReadRecordedDirectory(parent, fresh);
+                if (siblings != null && !siblings.Any(entry => names.Equals(entry.Name, child)))
+                    return new StorageEntry[0];
+                throw;
+            }
+        }
+
         public void DiscardTemporary(string name)
         {
             try

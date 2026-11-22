@@ -392,7 +392,10 @@ namespace Backup.Core
                 Control.Checkpoint(false);
             if (operationDefinitions == null)
                 operationDefinitions = catalog.LoadTopology().Destinations.ToDictionary(d => d.Id);
-            var value = adapters.Create(operationDefinitions[id]) as IManagedBackupDestination;
+            DestinationDefinition definition;
+            if (!operationDefinitions.TryGetValue(id, out definition))
+                throw new IOException("原仓库配置已不存在，保留待处理记录。");
+            var value = adapters.Create(definition) as IManagedBackupDestination;
             if (value == null)
                 throw new NotSupportedException("此仓库尚未实现下载和删除。");
             var cancel = value as ICancellableBackupDestination;

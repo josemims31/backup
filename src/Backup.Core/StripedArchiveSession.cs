@@ -341,15 +341,25 @@ namespace Backup.Core
             }
             catch (TransferReconciliationRequiredException error)
             {
-                Interlocked.Exchange(ref job.Volume.AwaitingConfirmation, 1);
-                catalog.MarkUploadConfirmationPending(archive.ArchiveId, job.Volume.Object.Name, id);
+                bool submitted = job.Retry.HasSent || catalog.UploadStages(id, job.Volume.Object.Name).Count > 0;
+                if (submitted)
+                {
+                    Interlocked.Exchange(ref job.Volume.AwaitingConfirmation, 1);
+                    catalog.MarkUploadConfirmationPending(archive.ArchiveId, job.Volume.Object.Name, id);
+                }
+                else
+                {
+                    Interlocked.CompareExchange(ref job.Volume.Failure, error, null);
+                    job.Volume.Failed[id] = error.Message;
+                    catalog.MarkVolumeUploadFailed(archive, job.Place, job.Volume.Object, error.Message);
+                }
                 job.Retry.Dispose();
                 if (Progress != null)
                     Progress(new TransferProgress {
                         ObjectName = job.Volume.Object.Name,
                         DestinationId = id,
                         GroupId = job.Place.GroupId,
-                        State = "confirmation-pending",
+                        State = submitted ? "confirmation-pending" : "upload-failed",
                         Attempt = RetryUploader.DefaultAttempts,
                         Error = error.Message
                     });

@@ -127,6 +127,7 @@ namespace Backup.Desktop
 
         private void OperationProgress(double percent, bool indeterminate)
         {
+            double value = Math.Max(0, Math.Min(100, percent));
             foreach (string name in new[]
             {
                 "JobProgress",
@@ -137,20 +138,50 @@ namespace Backup.Desktop
             )
             {
                 var bar = Control<ProgressBar>(name);
-                bar.IsIndeterminate = indeterminate;
-                bar.Value = Math.Max(0, Math.Min(100, percent));
+                if (bar.IsIndeterminate != indeterminate)
+                    bar.IsIndeterminate = indeterminate;
+                if (bar.Value != value)
+                    bar.Value = value;
             }
+        }
+
+        private sealed class IntegrityProgressUpdate
+        {
+            public int Generation;
+            public Action Apply;
+        }
+
+        private IntegrityProgressUpdate pendingIntegrityProgress;
+
+        private void PostIntegrityProgress(int generation, Action apply)
+        {
+            var update = new IntegrityProgressUpdate { Generation = generation, Apply = apply };
+            while (true)
+            {
+                var previous = System.Threading.Volatile.Read(ref pendingIntegrityProgress);
+                if (generation != System.Threading.Volatile.Read(ref operationGeneration) ||
+                    System.Threading.Interlocked.CompareExchange(ref pendingIntegrityProgress, update, previous) == previous)
+                    return;
+            }
+        }
+
+        private void RefreshIntegrityProgress()
+        {
+            var update = System.Threading.Interlocked.Exchange(ref pendingIntegrityProgress, null);
+            if (update != null && busy && !disposed && !closeAfterWork && update.Generation == operationGeneration &&
+                (!repairingBackups || Backend.ActiveBackup == null || !Backend.ActiveBackup.IsStopping))
+                update.Apply();
         }
 
         private Action<CleanupProgress> CleanupReporter()
         {
             int generation = operationGeneration;
+            bool integrityRepair = repairingBackups;
             return value =>
             {
                 if (Window.Dispatcher.HasShutdownStarted)
                     return;
-                Window.Dispatcher.BeginInvoke(
-                    new Action(delegate
+                Action apply = delegate
                 {
                     if (!busy || disposed || closeAfterWork || generation != operationGeneration || repairingBackups && Backend.ActiveBackup != null && Backend.ActiveBackup.IsStopping)
                         return;
@@ -167,14 +198,18 @@ namespace Backup.Desktop
                         "\n" +
                         value.Message;
                     SetOperationText(message);
+                    if (integrityRepair)
+                        return;
                     OperationProgress(
                         value.TotalObjects == 0 ? (value.TotalArchives == 0 ? 0 : 100.0 * value.CompletedArchives / value.TotalArchives) : 100.0 * value.DeletedObjects / value.TotalObjects,
                         value.TotalObjects == 0 &&
                         value.TotalArchives == 0
                     );
-                }),
-                    DispatcherPriority.Background
-                );
+                };
+                if (integrityRepair)
+                    PostIntegrityProgress(generation, apply);
+                else
+                    Window.Dispatcher.BeginInvoke(apply, DispatcherPriority.Background);
             };
         }
 
@@ -183,15 +218,15 @@ namespace Backup.Desktop
             return OperationReporter("正在处理迁移：");
         }
 
-        private Action<string> OperationReporter(string prefix)
+        private Action<string> OperationReporter(string prefix, bool integrityProgress = false)
         {
             int generation = operationGeneration;
             return message =>
             {
                 if (Window.Dispatcher.HasShutdownStarted)
                     return;
-                Window.Dispatcher.BeginInvoke(
-                    new Action(delegate
+                bool notice = message.StartsWith("重试成功", StringComparison.Ordinal) || message.StartsWith("上传失败", StringComparison.Ordinal);
+                Action apply = delegate
                 {
                     if (!busy || disposed || closeAfterWork || generation != operationGeneration)
                         return;
@@ -225,10 +260,13 @@ namespace Backup.Desktop
                     }
 
                     SetOperationText(prefix + message);
-                    OperationProgress(0, true);
-                }),
-                    DispatcherPriority.Background
-                );
+                    if (!integrityProgress)
+                        OperationProgress(0, true);
+                };
+                if (integrityProgress && !notice)
+                    PostIntegrityProgress(generation, apply);
+                else
+                    Window.Dispatcher.BeginInvoke(apply, DispatcherPriority.Background);
             };
         }
 

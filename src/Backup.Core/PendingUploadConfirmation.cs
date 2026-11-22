@@ -180,7 +180,9 @@ namespace Backup.Core
             var result = new List<IntegrityFinding>();
             var readableRoots = new HashSet<string>();
             var definitions = catalog.LoadTopology().Destinations.ToDictionary(d => d.Id);
-            var candidates = catalog.PendingVolumeTransfers().Where(p => (archiveIds == null || archiveIds.Contains(p.ArchiveId)) && p.Phase != "checking" && (!activeOperation || p.AwaitingConfirmation))
+            var candidates = catalog.PendingVolumeTransfers().Where(p => (archiveIds == null || archiveIds.Contains(p.ArchiveId)) &&
+                (p.Phase != "checking" || !activeOperation && (p.AwaitingConfirmation || p.MetadataMatched || p.ConfirmationDamaged)) &&
+                (!activeOperation || p.AwaitingConfirmation))
                 .ToList();
             var eligible = new HashSet<long>(candidates.Select(p => p.ArchiveId).Distinct().Where(id => catalog.CanConfirmUpload(id, activeOperation, preserveMissing)));
             foreach (var pending in candidates.Where(p => eligible.Contains(p.ArchiveId) && !catalog.OwnsUploadRetry(p.Placement.DestinationId, p.Object.Name) &&
@@ -191,15 +193,17 @@ namespace Backup.Core
                 !definitions[p.Placement.DestinationId].Retired)))
             {
                 // Older builds could mark a pre-PUT directory failure as pending.
-                // A temporary phase with no journal token and no registered copy
-                // predates OpenTemporary; it is missing data, not an uncertain PUT.
-                bool unstarted = !activeOperation && pending.AwaitingConfirmation && pending.Phase == "temporary" && catalog.UploadStages(pending.Placement.DestinationId, pending.Object.Name).Count == 0 &&
+                // These phases precede sending bytes when no owned upload or copy exists.
+                var stages = catalog.UploadStages(pending.Placement.DestinationId, pending.Object.Name);
+                bool unstarted = !activeOperation && (pending.AwaitingConfirmation || pending.MetadataMatched || pending.ConfirmationDamaged) &&
+                    (pending.Phase == "checking" || pending.Phase == "temporary") && stages.Count == 0 &&
                     !catalog.GetCopies(pending.ArchiveId)
                     .Any(copy => copy.DestinationId == pending.Placement.DestinationId &&
                     copy.Object.Name == pending.Object.Name);
                 cancellation.ThrowIfCancellationRequested();
                 IBackupDestination created = null;
                 bool submitted = false;
+                bool nativePending = stages.Count > 0 && catalog.HasUnresolvedOpenListUpload(pending.Placement.DestinationId, pending.Object.Name);
                 var finding = new IntegrityFinding
                 {
                     ArchiveId = pending.ArchiveId,
@@ -224,6 +228,8 @@ namespace Backup.Core
                         cancel.OperationCancellation = cancellation;
                     var abandoned = formalOnly ? target as IAbandonedUploadDestination : null;
                     var info = abandoned == null ? target.Stat(pending.Object.Name) : abandoned.StatFormal(pending.Object.Name);
+                    if (!string.IsNullOrEmpty(info.UnavailableReason))
+                        throw new IOException(info.UnavailableReason);
                     bool verified = false;
                     if (pending.UploadFailed && observeOnly)
                     {
@@ -249,7 +255,12 @@ namespace Backup.Core
                         finding.ActualSize = info.Size;
                         if (info.Name != pending.Object.Name || info.Size != pending.Object.Size)
                         {
-                            if (!activeOperation && !preserveMissing)
+                            if (nativePending)
+                            {
+                                finding.Status = "unavailable: 正式文件信息不匹配，已保留原 OpenList 上传任务。";
+                                catalog.MarkUploadConfirmationUnavailable(pending);
+                            }
+                            else if (!activeOperation && !preserveMissing)
                             {
                                 finding.Status = "size-or-name-mismatch";
                                 finding.RequiresManualRepairConfirmation = true;
@@ -264,7 +275,17 @@ namespace Backup.Core
                     }
                     else
                     {
-                        if (formalOnly)
+                        if (unstarted && ReleaseUnstarted(pending, finding, target, readableRoots, progress))
+                        {
+                            result.Add(finding);
+                            continue;
+                        }
+
+                        // Explicit repair may finish the exact native upload already
+                        // accepted by OpenList. An absent or terminal task may not
+                        // supply a temporary file for this path.
+                        bool confirmNative = formalOnly && recoverOwnedTemporary && !observeOnly && nativePending;
+                        if (formalOnly && !confirmNative)
                         {
                             var rootProbe = target as IReadOnlyDestinationProbe;
                             if (rootProbe != null && !readableRoots.Contains(target.Id))
@@ -273,24 +294,19 @@ namespace Backup.Core
                                 readableRoots.Add(target.Id);
                             }
 
-                            if (catalog.UploadStages(target.Id, pending.Object.Name).Count > 0)
+                            if (stages.Count > 0)
                             {
-                                finding.Status = "unavailable: 遗留临时文件尚未清理，保留清理记录后重试。";
+                                finding.Status = nativePending ? "unavailable: 原 OpenList 上传尚未核实，继续保留。" : "unavailable: 遗留临时文件尚未清理，保留清理记录后重试。";
                                 catalog.MarkUploadConfirmationUnavailable(pending);
                             }
                             else
                             {
                                 finding.Status = "missing";
                                 finding.RequiresManualRepairConfirmation = true;
+                                finding.RepairAction = "replace";
                                 catalog.MarkUploadConfirmationPending(pending.ArchiveId, pending.Object.Name, target.Id, true);
                             }
 
-                            result.Add(finding);
-                            continue;
-                        }
-
-                        if (unstarted && ReleaseUnstarted(pending, finding, target, readableRoots, progress))
-                        {
                             result.Add(finding);
                             continue;
                         }
@@ -316,18 +332,22 @@ namespace Backup.Core
                             !catalog.IsNodeArchive(pending.ArchiveId);
                         var recoverable = target as IRecoverableUploadDestination;
                         if (recoverable != null)
-                            foreach (string temporary in catalog.UploadStages(target.Id, pending.Object.Name))
+                            foreach (string temporary in stages)
                             {
                                 cancellation.ThrowIfCancellationRequested();
                                 if (!UploadStaging.IsOwnedTemporary(pending.Object.Name, temporary))
                                     throw new IOException("临时上传所有权记录无效，已保留。");
+                                if (confirmNative && !CanFinishNative(target.Id, temporary))
+                                    continue;
                                 var temp = target.Stat(temporary);
+                                if (confirmNative && !CanFinishNative(target.Id, temporary))
+                                    continue;
                                 if (!temp.Exists)
                                     continue;
                                 temporaryFound = true;
-                                if (temp.Size != pending.Object.Size)
+                                if (temp.Name != temporary || temp.Size != pending.Object.Size)
                                 {
-                                    if (!activeOperation && !preserveMissing)
+                                    if (!activeOperation && !preserveMissing && !confirmNative)
                                     {
                                         finding.Status = "size-or-name-mismatch";
                                         finding.ActualSize = temp.Size;
@@ -353,10 +373,15 @@ namespace Backup.Core
                                 break;
                             }
 
+                        if (confirmNative && !verified && catalog.HasUnresolvedOpenListUpload(target.Id, pending.Object.Name))
+                            throw new OpenListTaskPendingException("原 OpenList 上传结果尚未核实，保留原任务及文件。");
+
                         if (!verified && readable && !submitted && !preserveMissing && (!temporaryComplete || discardIncomplete))
                         {
                             finding.Status = temporaryFound ? "interrupted" : "missing";
                             finding.RequiresManualRepairConfirmation = true;
+                            if (confirmNative && !temporaryFound)
+                                finding.RepairAction = "replace";
                             catalog.MarkUploadConfirmationPending(pending.ArchiveId, pending.Object.Name, target.Id, true);
                         }
                     }
@@ -375,7 +400,12 @@ namespace Backup.Core
                             continue;
                         }
 
-                        if (recoverOwnedTemporary && !formalOnly)
+                        bool nativeCompleted = nativePending && stages.All(temporary =>
+                        {
+                            var task = catalog.FindOpenListUpload(target.Id, temporary);
+                            return task == null || task.State == "succeeded" || task.State == "renaming" || !CanFinishNative(task);
+                        });
+                        if (recoverOwnedTemporary && (!formalOnly || nativeCompleted))
                         {
                             try
                             {
@@ -425,8 +455,9 @@ namespace Backup.Core
                     else
                         catalog.MarkUploadConfirmationPending(pending.ArchiveId, pending.Object.Name, pending.Placement.DestinationId);
                 }
-                catch (OpenListTaskPendingException)
+                catch (OpenListTaskPendingException error)
                 {
+                    finding.Detail = error.Message;
                     catalog.MarkUploadConfirmationPending(pending.ArchiveId, pending.Object.Name, pending.Placement.DestinationId);
                 }
                 catch (OperationCanceledException)
@@ -457,7 +488,7 @@ namespace Backup.Core
 
                     if (!released)
                     {
-                        if (!activeOperation && !preserveMissing && error is InvalidBackupObjectException)
+                        if (!activeOperation && !preserveMissing && !nativePending && error is InvalidBackupObjectException)
                         {
                             finding.Status = "size-or-name-mismatch";
                             finding.RequiresManualRepairConfirmation = true;
@@ -482,6 +513,16 @@ namespace Backup.Core
             }
 
             return result;
+        }
+
+        private bool CanFinishNative(string destination, string temporary)
+        {
+            return CanFinishNative(catalog.FindOpenListUpload(destination, temporary));
+        }
+
+        private static bool CanFinishNative(OpenListUploadTask task)
+        {
+            return task != null && task.State != "failed" && task.State != "canceled" && task.State != "not-found";
         }
     }
 }

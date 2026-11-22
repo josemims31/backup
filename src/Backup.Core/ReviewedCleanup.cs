@@ -90,43 +90,16 @@ namespace Backup.Core
                     item.Object.Name)
                     .Select(group => group.First())
                     .ToList();
+                var stages = catalog.PendingUploadStages().Where(item => item.ArchiveId == id).ToList();
+                var archive = catalog.GetArchive(id);
+                if (stages.Any(item => catalog.HasUnresolvedOpenListUpload(item.DestinationId, item.Name)))
+                {
+                    errors.Add(archive.ArchiveName + "：原 OpenList 上传仍待核对，暂保留旧包和上传记录。");
+                    return errors;
+                }
                 var transfers = catalog.PendingVolumeTransfers().Where(item => item.ArchiveId == id).ToList();
-                var readable = new HashSet<string>();
-                foreach (var copy in copies)
-                    try
-                    {
-                        if (Control != null)
-                            Control.Checkpoint(false);
-                        var target = Open(copy.DestinationId);
-                        if (!readable.Contains(copy.DestinationId))
-                        {
-                            var probe = target as IReadOnlyDestinationProbe;
-                            if (probe != null)
-                                probe.CheckReadableRoot();
-                            readable.Add(copy.DestinationId);
-                        }
-
-                        if (Report != null)
-                            Report("正在删除旧版或已失效压缩包：" + copy.Object.Name);
-                        target.DeleteObject(copy.Object.Name);
-                        if (target.Stat(copy.Object.Name).Exists)
-                            throw new IOException("远程删除尚未生效。");
-                        target.DeleteTemporary(copy.Object.Name);
-                        catalog.ClearAbsentInspectedRecord(copy.Object.Name, copy.DestinationId);
-                        foreach (var pending in transfers.Where(item => item.Object.Name == copy.Object.Name && item.Placement.DestinationId == copy.DestinationId))
-                            catalog.ResolveVolumeTransfer(pending, false);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        throw;
-                    }
-                    catch (Exception error)
-                    {
-                        global::Backup.Core.RuntimeDiagnostics.Record("Backup.Core/ReviewedCleanup.cs:DeleteReviewedObsoleteArchive", error);
-                        if (!(error is IOException) && !(error is UnauthorizedAccessException) && !(error is NotSupportedException))
-                            throw;
-                        errors.Add(copy.Object.Name + " → " + copy.DestinationId + "：" + error.Message);
-                    }
+                var temporary = new HashSet<string>(stages.Select(item => item.DestinationId + "\0" + item.Name));
+                errors.AddRange(DeleteRecordedCopies(copies, transfers, temporary, "正在删除旧版或已失效压缩包：" + archive.ArchiveName, RepairCancellation));
 
                 if (errors.Count == 0)
                     catalog.FinishReviewedCleanup(id);
