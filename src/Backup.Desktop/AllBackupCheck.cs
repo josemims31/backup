@@ -306,7 +306,8 @@ namespace Backup.Desktop
             OperationCancellation.ThrowIfCancellationRequested();
             var archiveTasks = IntegrityTaskIds(taskIds);
             var topology = Catalog.LoadTopology();
-            var archives = Catalog.ListArchives(true).Where(archive => !new[] { "writing", "cleaned", "failed", "damaged" }.Contains(archive.Status) &&
+            var deferred = Catalog.DeferredVersionMetadataIds();
+            var archives = Catalog.ListArchives(true).Where(archive => !deferred.Contains(archive.ArchiveId) && !new[] { "writing", "cleaned", "failed", "damaged" }.Contains(archive.Status) &&
                 (archiveTasks == null ||
                 archiveTasks.Contains(archive.TaskId)))
                 .ToList();

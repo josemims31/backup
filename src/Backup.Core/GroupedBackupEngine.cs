@@ -11,6 +11,7 @@ namespace Backup.Core
         private readonly Dictionary<string, IBackupDestination> active = new Dictionary<string, IBackupDestination>(StringComparer.Ordinal);
         private int scopes;
         public IUploadJournal UploadJournal;
+        public bool ReportUploadStages;
         public TransferBandwidth Bandwidth;
         public TransferScheduler Transfers = TransferScheduler.Shared;
         public MemoryBudget Memory;

@@ -795,9 +795,15 @@ namespace Backup.Core
                 foreach (string part in path.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries))
                 {
                     current += "/" + part;
-                    if (!client.ExistsAsync(current, OperationCancellation).GetAwaiter().GetResult())
+                    try
+                    {
+                        CheckRoot(client, current);
+                    }
+                    catch (SftpPathNotFoundException)
+                    {
                         client.CreateDirectoryAsync(current, OperationCancellation).GetAwaiter().GetResult();
-                    CheckRoot(client, current);
+                        CheckRoot(client, current);
+                    }
                 }
 
                 return true;

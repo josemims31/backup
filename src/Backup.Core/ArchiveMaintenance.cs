@@ -359,6 +359,7 @@ namespace Backup.Core
 
         public BackupControl Control;
         public Action<string> Report;
+        public Action<string> ReportCleanupStage;
         public Func<string, string, int, long, bool> InjectFailure;
         public Action<TransferProgress> UploadProgress;
         private void ReportUploadProgress(TransferProgress value)
@@ -476,8 +477,12 @@ namespace Backup.Core
 
         private void Delete(string id, ObjectRecord item)
         {
+            if (ReportCleanupStage != null)
+                ReportCleanupStage(DestinationName(id) + " · 正在删除 " + item.Name);
             var destination = Open(id);
             destination.DeleteObject(item.Name);
+            if (ReportCleanupStage != null)
+                ReportCleanupStage(DestinationName(id) + " · 正在核对删除结果 " + item.Name);
             if (destination.Stat(item.Name).Exists)
                 throw new IOException("备份对象未删除：" + item.Name);
             destination.DeleteTemporary(item.Name);

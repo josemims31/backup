@@ -22,14 +22,16 @@ namespace Backup.Desktop
             if (taskIds == null || taskIds.Contains("__catalog__"))
                 active.Add("__catalog__");
             current.UnionWith(inspectedNodeArchives);
-            foreach (var revision in Catalog.NodeRevisions().Where(n => active.Contains(n.TaskId)))
+            var deferred = Catalog.DeferredVersionMetadataIds();
+            foreach (var revision in Catalog.NodeRevisions().Where(n => active.Contains(n.TaskId) && !deferred.Contains(n.ArchiveId)))
             {
                 active.Add(Catalog.GetArchive(revision.ArchiveId).TaskId);
                 current.Add(revision.ArchiveId);
             }
 
             var awaiting = AwaitingUploadArchiveIds();
-            return Catalog.ListArchives(true).Where(archive => active.Contains(archive.TaskId) && !awaiting.Contains(archive.ArchiveId) && archive.Status != "failed" && archive.Status != "writing" &&
+            return Catalog.ListArchives(true).Where(archive => active.Contains(archive.TaskId) && !awaiting.Contains(archive.ArchiveId) && !deferred.Contains(archive.ArchiveId) &&
+                archive.Status != "failed" && archive.Status != "writing" &&
                 archive.Status != "cleaned" &&
                 (archive.CurrentValidCopies < archive.TargetCopies ||
                 archive.Status == "repair-required") &&

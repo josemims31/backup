@@ -400,7 +400,8 @@ namespace Backup.Desktop
                 }
 
                 var currentNodes = Catalog.GetNodes().ToDictionary(n => n.Id);
-                bool retired = Catalog.NodeRevisions().Any(n => !currentNodes.ContainsKey(n.Id) || currentNodes[n.Id].ArchiveId != n.ArchiveId);
+                var deferred = new HashSet<string>(Catalog.DeferredVersionDeletions().Select(item => item.NodeId), StringComparer.Ordinal);
+                bool retired = Catalog.NodeRevisions().Any(n => !deferred.Contains(n.Id) && (!currentNodes.ContainsKey(n.Id) || currentNodes[n.Id].ArchiveId != n.ArchiveId));
                 if (result.Versions == 0 && !garbage && !retired)
                     return result;
                 // Publish once after all new packages and version references are ready.

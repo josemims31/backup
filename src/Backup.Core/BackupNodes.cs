@@ -185,6 +185,7 @@ namespace Backup.Core
             Transaction(delegate
             {
                 InitializeLocalNodeSchema();
+                InitializeDeferredVersionDeletions();
                 database.Execute(("CREATE TABLE IF NOT EXISTS backup_nodes(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,created_utc TEXT NOT NULL,archive_id INTEGER NOT NULL REFERENCES " +
                     "archives(id),revision INTEGER NOT NULL,digest TEXT NOT NULL,bytes INTEGER NOT NULL)"));
                 if (!database.Query("PRAGMA table_info(backup_nodes)").Any(r => (string)r[1] == "entry_path"))
@@ -288,7 +289,8 @@ namespace Backup.Core
         public bool NodeMetadataShared(long archiveId, string nodeId)
         {
             lock (gate)
-                return Scalar("SELECT count(*) FROM node_revisions WHERE archive_id=? AND node_id<>?", archiveId, nodeId) > 0;
+                return Scalar("SELECT count(*) FROM node_revisions WHERE archive_id=? AND node_id<>?", archiveId, nodeId) > 0 ||
+                    Scalar("SELECT count(*) FROM backup_nodes WHERE archive_id=? AND id<>?", archiveId, nodeId) > 0;
         }
 
         public void ForgetRetiredNodeRevision(string nodeId, long archiveId)

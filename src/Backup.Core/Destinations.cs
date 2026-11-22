@@ -186,7 +186,7 @@ namespace Backup.Core
         public TransferScheduler Transfers = TransferScheduler.Shared;
         public Action<string> PhaseChanged;
         public Action<TransferProgress> Progress;
-        internal bool SingleVerificationAttempt, DeferVerificationRetry;
+        internal bool SingleVerificationAttempt, DeferVerificationRetry, ReportUploadStages;
         internal UploadRetryState RetryState;
         public RetryUploader(IList<IBackupDestination> destinations, int attempts)
         {
@@ -275,6 +275,21 @@ namespace Backup.Core
             }
         }
 
+        private void ReportUploadStage(IBackupDestination destination, ObjectRecord record, UploadRetryState state, string phase)
+        {
+            if (!ReportUploadStages || Progress == null)
+                return;
+            Progress(new TransferProgress {
+                DestinationId = destination.Id,
+                ObjectName = record.Name,
+                State = phase,
+                Size = record.Size,
+                Attempt = state.Retries + 1,
+                AttemptLimit = attempts,
+                CheckAttempt = phase == "checking-upload-result" ? state.Checks + 1 : 0
+            });
+        }
+
         internal void Upload(ObjectRecord record, byte[] buffer, int count)
         {
             if (SingleVerificationAttempt)
@@ -305,6 +320,7 @@ namespace Backup.Core
                                 live.BackgroundProgress = Progress;
                             try
                             {
+                                ReportUploadStage(destination, record, state, "checking-upload-result");
                                 confirmed = UploadVerificationRetry.Check(destination, record, Control, PhaseChanged, out detail, state);
                             }
                             finally
@@ -429,7 +445,11 @@ namespace Backup.Core
                             {
                                 var managed = destination as IManagedBackupDestination;
                                 if (managed != null)
+                                {
+                                    ReportUploadStage(destination, record, state, "preparing-destination");
                                     managed.PrepareWrite();
+                                }
+                                ReportUploadStage(destination, record, state, "checking-target");
                                 var info = destination.Stat(record.Name);
                                 if (info.Exists)
                                 {
@@ -450,6 +470,7 @@ namespace Backup.Core
                                     prepare();
                                 });
                             var transferCancellation = destination as ICancellableBackupDestination;
+                            ReportUploadStage(destination, record, state, "queued-upload");
                             Transfers.Upload(
                                 destination.Id,
                                 () => single.Upload(record, buffer, count),

@@ -227,10 +227,11 @@ namespace Backup.Desktop
             }
 
             var removed = new HashSet<ConfirmedRepair>();
+            var deferred = Catalog.DeferredVersionMetadataIds();
             foreach (var item in selected)
             {
                 ArchiveSummary archive;
-                bool remove = !records.TryGetValue(item.ArchiveId, out archive) || archive.Status == "cleaned";
+                bool remove = !records.TryGetValue(item.ArchiveId, out archive) || archive.Status == "cleaned" || deferred.Contains(item.ArchiveId);
                 if (!remove && archive.TaskId != "__catalog__" && archive.TaskId != item.TaskId)
                     remove = true;
                 if (!remove && !stages.Contains(item.ArchiveId) &&

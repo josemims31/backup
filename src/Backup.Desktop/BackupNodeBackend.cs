@@ -46,9 +46,20 @@ namespace Backup.Desktop
 
         public NodeFileDatabase ReadNodeDatabase(BackupNode node, bool remote = false, MemoryReadCache cache = null, bool findMoved = true, string warehouseId = null)
         {
+            return ReadNodeDatabaseCore(node, remote, cache, findMoved, warehouseId, false);
+        }
+
+        private NodeFileDatabase ReadNodeDatabaseCore(BackupNode node, bool remote, MemoryReadCache cache, bool findMoved, string warehouseId, bool deferredDeletion)
+        {
             if (node.LocalOnly)
                 return Catalog.ReadLocalBackupNode(node.Id);
-            RequireRegisteredNode(node);
+            if (deferredDeletion)
+            {
+                if (!Catalog.CanReadDeferredVersion(node))
+                    throw new IOException("已删除版本的修订记录不匹配，已保留仓库文件。");
+            }
+            else
+                RequireRegisteredNode(node);
 #if UI_TEST
             if (TestNodeDatabaseRead != null)
                 TestNodeDatabaseRead(node);
@@ -90,9 +101,12 @@ namespace Backup.Desktop
                 var result = Catalog.ReadRegisteredNodeDatabase(bytes, node);
                 if (result.Revision != node.Revision)
                     throw new IOException("备份版本数据库修订号不匹配。");
-                // Only the current revision occupies the local node path.
-                RequireRegisteredNode(node);
-                CacheNode(node, bytes);
+                if (!deferredDeletion)
+                {
+                    // Only the current revision occupies the local node path.
+                    RequireRegisteredNode(node);
+                    CacheNode(node, bytes);
+                }
                 return result;
             }
         }
@@ -304,7 +318,7 @@ namespace Backup.Desktop
             return node;
         }
 
-        private IList<string> DeleteNodeMetadata(IEnumerable<BackupNode> revisions, Action<string> report)
+        private IList<string> DeleteNodeMetadata(IEnumerable<BackupNode> revisions, Action<string> report, bool retainFailures = false)
         {
             var errors = new List<string>();
             var maintenance = new ArchiveMaintenance(Catalog, Adapters())
@@ -325,8 +339,10 @@ namespace Backup.Desktop
                 Catalog.PrepareNodeMetadataDeletion(revision.ArchiveId);
                 try
                 {
-                    errors.AddRange(maintenance.DeleteReviewedObsoleteArchive(revision.ArchiveId));
-                    Catalog.ForgetRetiredNodeRevision(revision.Id, revision.ArchiveId);
+                    var failures = maintenance.DeleteReviewedObsoleteArchive(revision.ArchiveId);
+                    errors.AddRange(failures);
+                    if (!retainFailures || failures.Count == 0)
+                        Catalog.ForgetRetiredNodeRevision(revision.Id, revision.ArchiveId);
                 }
                 finally
                 {
@@ -491,13 +507,13 @@ namespace Backup.Desktop
             return string.Join("\n", nodes.Select(HistoricalNodeKey).OrderBy(key => key, StringComparer.Ordinal));
         }
 
-        private NodeFileDatabase ReadMaintenanceNodeDatabase(BackupNode node, MemoryReadCache cache = null, Action<string> report = null)
+        private NodeFileDatabase ReadMaintenanceNodeDatabase(BackupNode node, MemoryReadCache cache = null, Action<string> report = null, bool deferredDeletion = false)
         {
             Func<NodeFileDatabase> read = () =>
             {
                 if (report != null)
                     report("正在读取备份版本数据库并核对引用：" + node.Id);
-                return ReadNodeDatabase(node, cache: cache);
+                return ReadNodeDatabaseCore(node, false, cache, true, null, deferredDeletion);
             };
             var maintenance = maintenanceSearch.Value;
             return maintenance == null ? read() : maintenance.ReadNode(node, Math.Min(16L * 1024 * 1024, MemoryLimitBytes / 32), read);
@@ -607,7 +623,9 @@ namespace Backup.Desktop
             if (Catalog.PendingVolumeTransfers().Count > 0 || Catalog.PendingUploadStages().Count > 0)
                 return new List<string>();
             var nodes = Catalog.GetNodes().ToDictionary(n => n.Id);
-            var retired = Catalog.NodeRevisions().Where(r => !nodes.ContainsKey(r.Id) || nodes[r.Id].ArchiveId != r.ArchiveId && Catalog.GetArchive(nodes[r.Id].ArchiveId).Status != "cleaned").ToList();
+            var deferred = new HashSet<string>(Catalog.DeferredVersionDeletions().Select(item => item.NodeId), StringComparer.Ordinal);
+            var retired = Catalog.NodeRevisions().Where(r => !nodes.ContainsKey(r.Id) ? !deferred.Contains(r.Id) :
+                nodes[r.Id].ArchiveId != r.ArchiveId && Catalog.GetArchive(nodes[r.Id].ArchiveId).Status != "cleaned").ToList();
             if (retired.Count == 0)
                 return new List<string>();
             var errors = DeleteNodeMetadata(retired, report);

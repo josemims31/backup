@@ -16,6 +16,11 @@ namespace Backup.Desktop
     {
         public GroupedBackupResult BackupDatabase(BackupTaskDefinition task, Action<string> report = null, bool force = false)
         {
+            return BackupDatabase(task, report, force, false);
+        }
+
+        private GroupedBackupResult BackupDatabase(BackupTaskDefinition task, Action<string> report, bool force, bool describeStages)
+        {
             var targets = DatabaseBackupTargets();
             if (targets.Count == 0)
             {
@@ -28,7 +33,8 @@ namespace Backup.Desktop
                 return null;
             }
 
-            ValidateDatabaseBackupTargets(targets);
+            var topology = Catalog.LoadTopology();
+            ValidateDatabaseBackupTargets(targets, topology);
             string password = ResolveDatabaseBackupPassword();
             if (string.IsNullOrEmpty(password))
                 throw new ArgumentException("请先在设置中填写数据库密码。");
@@ -43,10 +49,11 @@ namespace Backup.Desktop
             }
 
             var inventory = new HashSet<long>(Catalog.ListArchives(true).Where(archive => archive.TaskId == "__catalog__").Select(archive => archive.ArchiveId));
-            var destinations = new HashSet<string>(targets.SelectMany(root => Catalog.LoadTopology().ResolveDestinations(root)));
+            var destinations = new HashSet<string>(targets.SelectMany(root => topology.ResolveDestinations(root)));
+            var status = describeStages && report != null ? new CatalogSnapshotProgress(topology, report) : null;
             // This is a local check of a previously rejected token, not another
             // login or remote probe. Do not reserve a doomed catalog upload.
-            foreach (var destination in Catalog.LoadTopology().Destinations.Where(item => destinations.Contains(item.Id) && item.Protocol == "webdav"))
+            foreach (var destination in topology.Destinations.Where(item => destinations.Contains(item.Id) && item.Protocol == "webdav"))
             {
                 var options = LoadConnection(destination.Id);
                 LoadSharedOpenListAuthorization(destination.Location, options);
@@ -58,6 +65,8 @@ namespace Backup.Desktop
                 }
                 catch (OpenListAuthorizationException)
                 {
+                    if (status != null)
+                        status.ReportPhase("正在恢复 OpenList 授权", destination.Id);
                     if (!RenewRepairOpenListAuthorization(destination.Location, options) && !OpenListFallbackActive(destination.Location, options.Username))
                         throw;
                     if (!OpenListFallbackActive(destination.Location, options.Username))
@@ -73,7 +82,9 @@ namespace Backup.Desktop
             {
                 ActiveBackup.Checkpoint();
                 GroupedBackupResult result;
-                var pipeline = new BackupPipelineView();
+                var pipeline = status == null && report != null ? new BackupPipelineView() : null;
+                if (status != null)
+                    status.ReportPhase("正在生成本地快照");
                 using (var snapshot = Catalog.CreateRecoverySnapshot(OperationMemory))
                 {
                     var source = SourceItem.FromSnapshot(snapshot, "catalog.db");
@@ -82,10 +93,14 @@ namespace Backup.Desktop
                     volume -= volume % 4096;
                     if (volume < 4096)
                         throw new IOException("软件总内存预算不足以同时保留数据库快照和上传缓冲。");
-                    if (report != null)
+                    if (status != null)
+                        status.ReportPhase("正在加密压缩数据库");
+                    else if (report != null)
                         report("正在内存中加密压缩数据库快照…");
+                    var adapters = Adapters();
+                    adapters.ReportUploadStages = status != null;
                     using (var buffers = new VolumeBufferPool(MemoryLimitBytes, volume, ActiveBackup, OperationMemory))
-                        result = new GroupedBackupEngine(Catalog, Adapters(), Path.Combine(BaseDirectory, "7za.dll")).BackupForTask(
+                        result = new GroupedBackupEngine(Catalog, adapters, Path.Combine(BaseDirectory, "7za.dll")).BackupForTask(
                             new[] { source },
                             targets.Count,
                             password,
@@ -95,9 +110,12 @@ namespace Backup.Desktop
                             null,
                             p =>
                         {
-                            pipeline.Observe(p);
+                            if (pipeline != null)
+                                pipeline.Observe(p);
                             ReportTransferNotice(p);
-                            if (report != null)
+                            if (status != null)
+                                status.Observe(p);
+                            else if (pipeline != null)
                                 report(pipeline.Text("正在同步数据库快照"));
                         },
                             "__catalog__",
@@ -122,15 +140,23 @@ namespace Backup.Desktop
                 }
 
                 inventory.Add(result.Archive.ArchiveId);
+                if (status != null)
+                    status.ReportPhase("正在登记已确认的新快照 " + result.Archive.ArchiveName);
                 Catalog.PublishCatalogSnapshot(result.Archive.ArchiveId, targets, "__catalog__", revision);
                 if (Catalog.GetSetting(PendingRepairCatalog) == "1")
                     Catalog.SetSetting(PendingRepairCatalog, "");
                 if (task != null)
                     Catalog.ReleasePublishedRetirements(task.Id);
-                var cleanup = new ArchiveMaintenance(Catalog, Adapters())
+                var maintenance = new ArchiveMaintenance(Catalog, Adapters())
                 {
                     Control = ActiveBackup
-                }.CollectGarbageDetailed(null, true, null, inventory, destinations);
+                };
+                if (status != null)
+                {
+                    status.ReportPhase("正在检查旧快照清理记录");
+                    maintenance.ReportCleanupStage = message => status.ReportPhase("清理旧快照 · " + message);
+                }
+                var cleanup = maintenance.CollectGarbageDetailed(null, true, null, inventory, destinations);
                 RefreshManagedArchiveInventory(inventory);
                 if (report != null)
                     report("数据库备份完成：" + result.Archive.ArchiveName + (cleanup.PendingArchives > 0 ? "；旧快照清理待重试" : ""));

@@ -56,16 +56,16 @@ namespace Backup.Desktop
             return scope;
         }
 
-        private bool ReviewOwnsName(AllBackupCheckResult review, string name, IDictionary<string, ArchiveSummary> archives)
+        private bool ReviewOwnsName(AllBackupCheckResult review, string name, IDictionary<string, ArchiveSummary> archives, ISet<long> deferred)
         {
-            if (review.TaskIds == null)
+            if (review.TaskIds == null && deferred.Count == 0)
                 return true;
             string archive = BackupObjectNaming.ArchiveName(name);
             ArchiveSummary record;
-            if (archive == null)
-                return false;
-            if (archives.TryGetValue(archive, out record))
-                return review.ArchiveTasks.Contains(record.TaskId);
+            if (archive != null && archives.TryGetValue(archive, out record))
+                return !deferred.Contains(record.ArchiveId) && (review.ArchiveTasks == null || review.ArchiveTasks.Contains(record.TaskId));
+            if (review.TaskIds == null || archive == null)
+                return review.TaskIds == null;
             if (archive.StartsWith("catalog-", StringComparison.OrdinalIgnoreCase))
                 return review.TaskIds.Contains("__catalog__");
             return review.TaskIds.Any(id =>
@@ -83,7 +83,9 @@ namespace Backup.Desktop
             var archives = Catalog.ListArchives(true).Where(item => !string.IsNullOrEmpty(item.ArchiveName)).ToDictionary(item => item.ArchiveName, StringComparer.OrdinalIgnoreCase);
             var indexed = new ReviewFindingIndex(review.Findings);
             var byId = archives.Values.ToDictionary(item => item.ArchiveId);
-            Func<long, bool> owns = id => review.ArchiveTasks == null || review.ArchiveTasks.Contains(byId.ContainsKey(id) ? byId[id].TaskId : Catalog.GetArchive(id).TaskId);
+            var deferred = Catalog.DeferredVersionMetadataIds();
+            Func<long, bool> owns = id => !deferred.Contains(id) &&
+                (review.ArchiveTasks == null || review.ArchiveTasks.Contains(byId.ContainsKey(id) ? byId[id].TaskId : Catalog.GetArchive(id).TaskId));
             var objects = new Dictionary<long, Dictionary<string, ObjectRecord>>();
             var stageNames = new HashSet<string>(Catalog.PendingUploadStages().SelectMany(stage => Catalog.UploadStages(stage.DestinationId, stage.Name).Select(name => stage.DestinationId + "\0" + name)), StringComparer.OrdinalIgnoreCase);
             var obsolete = (review.TaskIds == null || review.TaskIds.Contains("__catalog__")) 
@@ -112,7 +114,7 @@ namespace Backup.Desktop
                             continue;
                         }
 
-                        if (!ReviewOwnsName(review, entry.Name, archives))
+                        if (!ReviewOwnsName(review, entry.Name, archives, deferred))
                             continue;
                         StoredArchiveObject registered;
                         if (known.TryGetValue(entry.Name, out registered))
@@ -808,6 +810,7 @@ namespace Backup.Desktop
             try
             {
                 var rotationErrors = new List<string>();
+                var versionDeletions = RepairDeferredVersionDeletions(taskIds, report, rotationErrors);
                 foreach (var task in workspace.Tasks.Where(t => (taskIds == null || taskIds.Contains(t.Id)) && Catalog.TaskHasNodes(t.Id)))
                     rotationErrors.AddRange(RecycleTaskNodes(task, DateTime.UtcNow, report));
                 if (taskIds == null)
@@ -893,6 +896,7 @@ namespace Backup.Desktop
                     !detailedArchives.Contains(item.ArchiveId))
                     .Select(item => item.ArchiveId));
                 repairIds.UnionWith(uploadFindings.Where(item => item.RepairAction == "replace" && !detailedArchives.Contains(item.ArchiveId)).Select(item => item.ArchiveId));
+                repairIds.ExceptWith(Catalog.DeferredVersionMetadataIds());
                 errors.AddRange(RunConfirmedRepairs(workspace, report, IntegrityTaskIds(taskIds), progress, cleanupProgress, false, true, repairIds, false, true));
                 // Reclassify entries exposed by intent cleanup or unregistration using
                 // committed inventory changes, without repeating directory enumeration.
@@ -998,11 +1002,13 @@ namespace Backup.Desktop
                         errors.Add(finding.Name + "：" + IntegrityMismatch(finding));
                 // Publish only after repair, cleanup and the last remote recheck.
                 // A pending flag alone must not turn an unchanged repair into a sync.
-                if (catalogTargets.Count > 0 && (RepairChanged(revision, deletions) || repairCatalog))
+                if (catalogTargets.Count > 0 && (RepairChanged(revision, deletions) || repairCatalog || versionDeletions.Count > 0))
                     try
                     {
                         Catalog.SetSetting(PendingRepairCatalog, "1");
-                        BackupDatabase(null, report);
+                        BackupDatabase(null, report, force: false, describeStages: true);
+                        if (versionDeletions.Count > 0)
+                            Catalog.FinishDeferredVersionDeletions(versionDeletions);
                         Catalog.SetSetting(PendingRepairCatalog, "");
                         synchronized = true;
                         var queue = PendingRepairs();
@@ -1020,6 +1026,8 @@ namespace Backup.Desktop
                             throw;
                         errors.Add("修复后的数据库同步未完成：" + error.Message);
                     }
+                else if (catalogTargets.Count == 0 && versionDeletions.Count > 0)
+                    Catalog.FinishDeferredVersionDeletions(versionDeletions);
 
                 lastIntegrityReview = final;
                 return errors.Distinct().ToList();

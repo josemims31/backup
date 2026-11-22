@@ -80,6 +80,7 @@ namespace Backup.Core
                 database.Execute("DELETE FROM backup_nodes WHERE task_id=?", task.TaskId);
                 database.Execute("DELETE FROM node_revisions WHERE task_id=?", task.TaskId);
                 database.Execute("DELETE FROM local_backup_nodes WHERE task_id=?", task.TaskId);
+                database.Execute("DELETE FROM deferred_version_deletions WHERE task_id=?", task.TaskId);
                 foreach (long id in task.ArchiveIds)
                 {
                     var stages = database.Query("SELECT shadow_group FROM replica_stages WHERE archive_id=?", id).Select(r => (string)r[0]).ToList();

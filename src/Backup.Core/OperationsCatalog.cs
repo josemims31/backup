@@ -200,7 +200,7 @@ namespace Backup.Core
             "FROM archive_leases l WHERE l.archive_id=a.id) AND NOT EXISTS(SELECT 1 FROM placements p WHERE p.archive_id=a.id AND (p.reserved>0 OR p.status IN " +
             "('writing','reconcile-required'))) AND NOT EXISTS(SELECT 1 FROM archive_cleanup c WHERE c.archive_id=a.id AND c.state='complete') AND NOT EXISTS(SELECT 1 FROM " +
             "warehouse_move_objects m JOIN objects o ON o.name=m.name JOIN warehouse_moves w ON w.destination_id=m.destination_id WHERE o.archive_id=a.id AND " +
-            "w.state<>'complete')");
+            "w.state<>'complete') AND NOT EXISTS(SELECT 1 FROM deferred_version_deletions d WHERE d.task_id=a.task_id AND d.cleanup_complete=0 AND a.id<=d.archive_limit)");
         public IList<long> GetGarbageCandidates(bool? systemOnly = null, string taskId = null)
         {
             lock (gate)

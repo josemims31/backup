@@ -366,6 +366,7 @@ namespace Backup.Core
             copy.Execute("DELETE FROM settings WHERE key LIKE 'source_files_v1:%' OR key='schedule_request_queue_v1'");
             copy.Execute("DROP TABLE IF EXISTS warehouse_inventory");
             copy.Execute("DELETE FROM archive_leases WHERE token LIKE 'compaction:%'");
+            copy.Execute("DELETE FROM deferred_version_deletions WHERE cleanup_complete=1");
             copy.Execute("INSERT OR REPLACE INTO settings(key,value) VALUES('recovery_snapshot_v1','1')");
         }
 

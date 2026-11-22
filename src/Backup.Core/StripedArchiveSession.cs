@@ -295,6 +295,7 @@ namespace Backup.Core
                     InjectFailure = InjectFailure,
                     RetryState = job.Retry,
                     DeferVerificationRetry = true,
+                    ReportUploadStages = registry.ReportUploadStages,
                     PhaseChanged = phase => catalog.VolumePhase(job.Volume.Object.Name, id, phase)
                 };
                 uploader.Progress = progress =>

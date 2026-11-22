@@ -1,11 +1,132 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 
 namespace Backup.Core
 {
+    public sealed class DeferredVersionDeletion
+    {
+        public string NodeId, TaskId;
+        public long NodeArchiveId, ArchiveLimit;
+        public ISet<long> DataArchives;
+        public bool CleanupComplete;
+    }
+
     public sealed partial class BackupCatalog
     {
+        private void InitializeDeferredVersionDeletions()
+        {
+            database.Execute("CREATE TABLE IF NOT EXISTS deferred_version_deletions(node_id TEXT PRIMARY KEY,task_id TEXT NOT NULL,node_archive INTEGER NOT NULL,archive_limit INTEGER NOT NULL,data_archives TEXT,cleanup_complete INTEGER NOT NULL DEFAULT 0)");
+            database.Execute("CREATE INDEX IF NOT EXISTS deferred_version_deletions_task ON deferred_version_deletions(task_id,cleanup_complete,archive_limit)");
+        }
+
+        private static string EncodeArchiveIds(IEnumerable<long> archives)
+        {
+            return string.Join(",", archives.Distinct().Select(id => id.ToString(CultureInfo.InvariantCulture)));
+        }
+
+        public BackupNode DeleteVersionLocally(string id)
+        {
+            return Transaction(delegate
+            {
+                var local = GetLocalBackupNodes().FirstOrDefault(item => item.Id == id);
+                var node = local ?? GetNodes().FirstOrDefault(item => item.Id == id);
+                if (node == null)
+                    return null;
+
+                long limit = Scalar("SELECT coalesce(max(id),0) FROM archives WHERE task_id=?", node.TaskId);
+                string references = null;
+                if (local != null)
+                {
+                    try
+                    {
+                        references = EncodeArchiveIds(ReadLocalBackupNode(id).ArchiveIds);
+                    }
+                    catch (System.IO.IOException error)
+                    {
+                        RuntimeDiagnostics.Record("BackupCatalog:DeleteVersionLocally", error);
+                    }
+                    // Reserve a fresh identity for the next unfinished version.
+                    database.Execute("UPDATE local_backup_nodes SET id=?,payload=NULL,bytes=0,digest='' WHERE id=?", Guid.NewGuid().ToString("N"), id);
+                    database.Execute("UPDATE recovery_revision SET value=value+1 WHERE id=1");
+                    SetWorkingNodeBasis(node.TaskId, "pending-refresh");
+                }
+                else
+                {
+                    string latest = (string)database.Query("SELECT id FROM backup_nodes WHERE task_id=? ORDER BY created_utc DESC,id DESC LIMIT 1", node.TaskId)[0][0];
+                    // Keep the revision and its physical copies for repair after restart.
+                    RegisterNodeRevision(node);
+                    database.Execute("DELETE FROM backup_nodes WHERE id=?", id);
+                    if (latest == id)
+                    {
+                        SetWorkingNodeBasis(node.TaskId, "pending-refresh");
+                        RememberVersionDeletionFloor(node.TaskId, node.ArchiveId);
+                    }
+                }
+
+                if (!TaskHasNodes(node.TaskId))
+                    RememberVersionDeletionFloor(node.TaskId, limit);
+                database.Execute("INSERT OR REPLACE INTO deferred_version_deletions(node_id,task_id,node_archive,archive_limit,data_archives,cleanup_complete) VALUES(?,?,?,?,?,0)",
+                    id, node.TaskId, node.ArchiveId, limit, references);
+                ClearNodeGarbageReview();
+                RepositoryStatusChanged(CatalogChange.Archives, node.TaskId);
+                return node;
+            });
+        }
+
+        public IList<DeferredVersionDeletion> DeferredVersionDeletions()
+        {
+            lock (gate)
+                return database.Query("SELECT node_id,task_id,node_archive,archive_limit,data_archives,cleanup_complete FROM deferred_version_deletions").Select(row => new DeferredVersionDeletion
+                {
+                    NodeId = (string)row[0],
+                    TaskId = (string)row[1],
+                    NodeArchiveId = (long)row[2],
+                    ArchiveLimit = (long)row[3],
+                    DataArchives = row[4] == null ? null : new HashSet<long>(((string)row[4]).Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
+                        .Select(value => long.Parse(value, CultureInfo.InvariantCulture))),
+                    CleanupComplete = (long)row[5] != 0
+                }).ToList();
+        }
+
+        public void RecordDeferredVersionArchives(string id, IEnumerable<long> archives)
+        {
+            lock (gate)
+                database.Execute("UPDATE deferred_version_deletions SET data_archives=? WHERE node_id=? AND data_archives IS NULL", EncodeArchiveIds(archives), id);
+        }
+
+        public bool CanReadDeferredVersion(BackupNode node)
+        {
+            lock (gate)
+                return Scalar("SELECT count(*) FROM deferred_version_deletions d JOIN node_revisions r ON r.node_id=d.node_id AND r.archive_id=d.node_archive " +
+                    "WHERE d.cleanup_complete=0 AND d.node_id=? AND d.task_id=? AND d.node_archive=? AND r.revision=? AND r.digest=? AND r.bytes=? AND r.entry_path=?",
+                    node.Id, node.TaskId, node.ArchiveId, node.Revision, node.Digest, node.DatabaseBytes, node.EntryPath) != 0;
+        }
+
+        public ISet<long> DeferredVersionMetadataIds()
+        {
+            lock (gate)
+                return new HashSet<long>(database.Query("SELECT DISTINCT r.archive_id FROM deferred_version_deletions d JOIN node_revisions r ON r.node_id=d.node_id " +
+                    "WHERE NOT EXISTS(SELECT 1 FROM backup_nodes n WHERE n.archive_id=r.archive_id)").Select(row => (long)row[0]));
+        }
+
+        public void MarkDeferredVersionCleanupComplete(string taskId)
+        {
+            lock (gate)
+                database.Execute("UPDATE deferred_version_deletions SET cleanup_complete=1 WHERE task_id=? AND cleanup_complete=0", taskId);
+        }
+
+        public void FinishDeferredVersionDeletions(IEnumerable<string> tasks)
+        {
+            Transaction(delegate
+            {
+                foreach (string task in tasks)
+                    database.Execute("DELETE FROM deferred_version_deletions WHERE task_id=? AND cleanup_complete=1", task);
+                return 0;
+            });
+        }
+
         // Archives belong to exactly one task. With no remaining version of
         // that task, its data has no version references. Unregister it locally;
         // leave all physical files for explicit orphan cleanup during repair.
@@ -104,17 +225,18 @@ namespace Backup.Core
                 if (TaskHasNodes(taskId))
                     return 0;
                 long source = Scalar("SELECT max(id) FROM archives WHERE task_id=? AND status<>'writing'", taskId);
-                database.Execute(
-                    "INSERT OR IGNORE INTO local_backup_nodes(task_id,id,created_utc,revision,digest,bytes,source_archive,payload) VALUES(?,?,?,1,'',0,?,NULL)",
-                    taskId,
-                    Guid.NewGuid().ToString("N"),
-                    DateTime.UtcNow.ToString("o"),
-                    source
-                );
-                database.Execute("UPDATE local_backup_nodes SET source_archive=MAX(source_archive,?) WHERE task_id=?", source, taskId);
+                RememberVersionDeletionFloor(taskId, source);
                 return 0;
             });
             UnregisterVersionlessTaskData(taskId);
+        }
+
+        private void RememberVersionDeletionFloor(string taskId, long archiveId)
+        {
+            database.Execute(
+                "INSERT OR IGNORE INTO local_backup_nodes(task_id,id,created_utc,revision,digest,bytes,source_archive,payload) VALUES(?,?,?,1,'',0,?,NULL)",
+                taskId, Guid.NewGuid().ToString("N"), DateTime.UtcNow.ToString("o"), archiveId);
+            database.Execute("UPDATE local_backup_nodes SET source_archive=? WHERE task_id=? AND source_archive<?", archiveId, taskId, archiveId);
         }
 
         // Also upgrades local versions explicitly deleted with 0.14.20. Only
@@ -123,7 +245,7 @@ namespace Backup.Core
         {
             List<object[]> rows;
             lock (gate)
-                rows = database.Query("SELECT task_id,source_archive FROM local_backup_nodes WHERE payload IS NULL");
+                rows = database.Query("SELECT n.task_id,n.source_archive FROM local_backup_nodes n WHERE n.payload IS NULL AND NOT EXISTS(SELECT 1 FROM deferred_version_deletions d WHERE d.task_id=n.task_id)");
             foreach (var row in rows)
                 if (tasks == null || tasks.Contains((string)row[0]))
                     UnregisterVersionlessTaskData((string)row[0], (long)row[1]);

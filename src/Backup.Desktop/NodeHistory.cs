@@ -98,23 +98,21 @@ namespace Backup.Desktop
             var node = SelectedBackupNode;
             if (node == null || busy)
                 return;
-            if (!ConfirmRemoteTaskAction("删除备份版本", "删除所选备份版本：" + node + "\n" + (node.LocalOnly ? "将删除该任务的本地未完成清单。" : "将删除该备份版本的本地及仓库数据库，其他备份版本保留。") + "数据包在修复完整性时按剩余引用回收。"))
+            if (!ConfirmRemoteTaskAction("删除备份版本", "将从本地移除所选备份版本 " + node + "。\n运行修复完整性时清理仓库中无引用的文件，并同步已配置的数据库快照。"))
                 return;
-            Backend.BeginBackup();
-            SetBusy(true, true, "正在删除备份版本数据库…");
+            SetBusy(true, false, "正在移除本地备份版本…");
             try
             {
-                var report = OperationReporter("");
-                await Task.Run(() => Backend.DeleteBackupNode(node.Id, report));
+                await Task.Run(() => Backend.DeleteBackupNodeLocally(node.Id));
                 historyDirty = true;
                 ApplyCommittedChanges();
-                RebuildHistory();
+                if (SelectedBackupNode != null && SelectedBackupNode.Id == node.Id)
+                    RebuildHistory();
                 Log("已删除备份版本：" + node);
-                SetOperationText("备份版本已删除。数据空间将在修复完整性时回收。", OperationState.Succeeded);
+                SetOperationText("备份版本已从本地移除。仓库文件清理和数据库快照同步将在修复完整性时处理。", OperationState.Succeeded);
             }
             finally
             {
-                Backend.EndBackup();
                 SetBusy(false, false, null);
             }
         }
