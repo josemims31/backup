@@ -27,7 +27,7 @@ namespace Backup.Desktop
     {
         public readonly List<string> Directories = new List<string>();
         public readonly List<RestoredFile> Entries = new List<RestoredFile>();
-        internal Action<string> CopyTo;
+        internal Func<string, bool, int> CopyTo;
         internal MemoryReadCache Cache;
         internal readonly System.Collections.Concurrent.ConcurrentQueue<string> RepairWarnings = new System.Collections.Concurrent.ConcurrentQueue<string>();
         public IList<string> Warnings
@@ -167,7 +167,8 @@ namespace Backup.Desktop
                 });
             }
 
-            selection.CopyTo = destination => RestoreToCore(requests, destination, report, selection.Cancellation.Token, selection.RepairWarnings.Enqueue, search);
+            selection.CopyTo = (destination, skipDuplicates) =>
+                RestoreToCore(requests, destination, report, selection.Cancellation.Token, selection.RepairWarnings.Enqueue, search, skipDuplicates);
             return selection;
         }
 
@@ -185,10 +186,11 @@ namespace Backup.Desktop
         )
         {
             using (var search = new RestoreSearchScope())
-                RestoreToCore(requests, destination, report, cancellation, warning, search);
+                RestoreToCore(requests, destination, report, cancellation, warning, search, false);
         }
 
-        private void RestoreToCore(IList<RestoreRequest> requests, string destination, Action<string> report, CancellationToken cancellation, Action<string> warning, RestoreSearchScope restoreSearch)
+        private int RestoreToCore(IList<RestoreRequest> requests, string destination, Action<string> report, CancellationToken cancellation, Action<string> warning,
+            RestoreSearchScope restoreSearch, bool skipDuplicates)
         {
             RestoreDestination.Validate(destination);
             requests = RestorePathLayout.AlignRequests(requests, destination);
@@ -196,12 +198,30 @@ namespace Backup.Desktop
             if (!cancellation.CanBeCanceled)
                 cancellation = DownloadCancellation;
             ValidateRestoreRequests(requests);
+            var pending = skipDuplicates ? new List<RestoreRequest>(requests.Count) : null;
+            if (skipDuplicates && report != null)
+                report("正在比对目标目录中的已有文件");
             foreach (var request in requests)
             {
+                cancellation.ThrowIfCancellationRequested();
                 string target = SafeRestorePath(destination, request.RelativePath);
-                if (Directory.Exists(target))
+                var existing = skipDuplicates ? new FileInfo(target) : null;
+                bool isFile = existing != null && existing.Exists;
+                if (!isFile && Directory.Exists(target))
                     throw new IOException("目标路径是文件夹，无法写入文件：" + target);
                 CheckRestoreParents(target, destination);
+                if (pending != null && (!isFile || !MatchesRestoreMetadata(existing, request.File)))
+                    pending.Add(request);
+            }
+
+            int skipped = 0;
+            if (pending != null)
+            {
+                cancellation.ThrowIfCancellationRequested();
+                skipped = requests.Count - pending.Count;
+                if (pending.Count == 0)
+                    return skipped;
+                requests = pending;
             }
 
             using (var cache = new MemoryReadCache(Math.Max(ArchiveObjectIO.MaximumVolumeBytes, MemoryLimitBytes - 192L * 1024 * 1024), TransferMemory))
@@ -246,6 +266,13 @@ namespace Backup.Desktop
                 if (failures.Count > 0)
                     throw new IOException("部分文件下载失败，其他压缩包已继续处理：\n" + string.Join("\n", failures));
             }
+            return skipped;
+        }
+
+        private static bool MatchesRestoreMetadata(FileInfo existing, FileHistoryRow file)
+        {
+            return (existing.Attributes & FileAttributes.ReparsePoint) == 0 && existing.Length == file.Size &&
+                file.Modified > 0 && existing.LastWriteTimeUtc.ToFileTimeUtc() == file.Modified;
         }
 
         private void ExtractSelection(
@@ -365,13 +392,15 @@ namespace Backup.Desktop
 
         public static void CopyRestored(RestoredSelection selection, string destination)
         {
+            CopyRestored(selection, destination, false);
+        }
+
+        public static int CopyRestored(RestoredSelection selection, string destination, bool skipDuplicates)
+        {
             if (selection.Bandwidth != null)
                 selection.Bandwidth.WaitForResume(selection.Cancellation.Token);
             if (selection.CopyTo != null)
-            {
-                selection.CopyTo(destination);
-                return;
-            }
+                return selection.CopyTo(destination, skipDuplicates);
 
             RestoreDestination.Validate(destination);
             var map = RestorePathLayout.Align(selection.Entries.Select(entry => entry.RelativePath).Concat(selection.Directories), destination);
@@ -468,6 +497,7 @@ namespace Backup.Desktop
 
             if (failures.Count > 0)
                 throw new IOException("部分文件下载失败，其他文件已继续处理：\n" + string.Join("\n", failures));
+            return 0;
         }
 
         private static void CheckRestoreParents(string file, string root)

@@ -9,6 +9,12 @@ namespace Backup.Desktop
     {
         public static string RestoreDirectory(Window owner, string title, string initialPath = "")
         {
+            bool skipDuplicates;
+            return RestoreDirectory(owner, title, initialPath, false, out skipDuplicates);
+        }
+
+        internal static string RestoreDirectory(Window owner, string title, string initialPath, bool restoreFiles, out bool skipDuplicates)
+        {
             StackPanel body;
             Button confirm;
             var window = Form(owner, title, out body, out confirm);
@@ -35,6 +41,18 @@ namespace Backup.Desktop
                 Margin = new Thickness(0, 8, 0, 0),
                 Foreground = System.Windows.Media.Brushes.SlateGray
             });
+            RadioButton skip = null;
+            if (restoreFiles)
+            {
+                skip = new RadioButton {
+                    Content = "跳过重复项",
+                    IsChecked = true,
+                    Margin = new Thickness(0, 12, 0, 6)
+                };
+                body.Children.Add(skip);
+                body.Children.Add(new RadioButton { Content = "覆盖已有文件" });
+            }
+
             string result = null;
             Save(
                 confirm,
@@ -57,7 +75,9 @@ namespace Backup.Desktop
                 if (location.Text.Length > 0)
                     location.SelectAll();
             };
-            return Show(window) ? result : null;
+            bool accepted = Show(window);
+            skipDuplicates = accepted && skip != null && skip.IsChecked == true;
+            return accepted ? result : null;
         }
     }
 }

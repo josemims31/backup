@@ -56,10 +56,10 @@ namespace Backup.Desktop
                 SaveUiPreference(SelectedTaskPreference, id);
         }
 
-        private string ChooseDownloadDirectory(string title)
+        private string ChooseDownloadDirectory(string title, bool restoreFiles, out bool skipDuplicates)
         {
             string previous = new PathHistory(scheduleJournal).Recall(PathPurpose.Download) ?? "";
-            return EditorDialogs.RestoreDirectory(Window, title, previous);
+            return EditorDialogs.RestoreDirectory(Window, title, previous, restoreFiles, out skipDuplicates);
         }
 
         private bool databaseSavedDisplayInitialized;

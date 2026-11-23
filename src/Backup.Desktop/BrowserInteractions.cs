@@ -411,10 +411,15 @@ namespace Backup.Desktop
 
         public Task DownloadToAsync(IList<BackupHistoryNode> nodes, string path, string warehouseId = null)
         {
-            return RunDownloadAsync(() => DownloadToCoreAsync(nodes, path, warehouseId));
+            return DownloadToAsync(nodes, path, warehouseId, false);
         }
 
-        private async Task DownloadToCoreAsync(IList<BackupHistoryNode> nodes, string path, string warehouseId = null)
+        private Task DownloadToAsync(IList<BackupHistoryNode> nodes, string path, string warehouseId, bool skipDuplicates)
+        {
+            return RunDownloadAsync(() => DownloadToCoreAsync(nodes, path, warehouseId, skipDuplicates));
+        }
+
+        private async Task DownloadToCoreAsync(IList<BackupHistoryNode> nodes, string path, string warehouseId = null, bool skipDuplicates = false)
         {
             if (nodes.Any(node => node.IsArchiveBrowseBlocked))
                 throw new IOException(nodes.First(node => node.IsArchiveBrowseBlocked).ArchiveBrowseNotice);
@@ -427,19 +432,23 @@ namespace Backup.Desktop
             Action<string> report = foreground ? OperationReporter("正在下载：") : null;
             try
             {
-                var warnings = await Task.Run(() =>
+                var result = await Task.Run(() =>
                 {
                     using (var selection = Backend.MaterializeDownload(nodes, warehouseId, report))
                     {
-                        DesktopBackend.CopyRestored(selection, path);
-                        return selection.Warnings;
+                        int skipped = DesktopBackend.CopyRestored(selection, path, skipDuplicates);
+                        return new { Skipped = skipped, Warnings = selection.Warnings };
                     }
                 });
-                string message = "下载完成：" + path + (warnings.Count == 0 ? "" : "\n以下备份副本需检查或修复：\n" + string.Join("\n", warnings));
+                string message = "下载完成：" + path;
+                if (result.Skipped > 0)
+                    message += " · 已跳过 " + result.Skipped + " 个重复项";
+                if (result.Warnings.Count > 0)
+                    message += "\n以下备份副本需检查或修复：\n" + string.Join("\n", result.Warnings);
                 if (foreground)
-                    SetOperationText(message, warnings.Count == 0 ? OperationState.Succeeded : OperationState.Attention);
+                    SetOperationText(message, result.Warnings.Count == 0 ? OperationState.Succeeded : OperationState.Attention);
                 else
-                    Log(message, warnings.Count == 0 ? OperationState.Succeeded : OperationState.Attention);
+                    Log(message, result.Warnings.Count == 0 ? OperationState.Succeeded : OperationState.Attention);
                 if (foreground)
                     OperationProgress(100, false);
             }
@@ -455,9 +464,10 @@ namespace Backup.Desktop
             var nodes = SelectedHistory(fromTree);
             if (nodes.Count == 0 || nodes.Any(node => node.IsArchiveBrowseBlocked))
                 return;
-            string destination = ChooseDownloadDirectory("选择下载目录");
+            bool skipDuplicates;
+            string destination = ChooseDownloadDirectory("选择下载目录", IsFolderHistoryView, out skipDuplicates);
             if (destination != null)
-                await DownloadToAsync(nodes, destination, warehouseId);
+                await DownloadToAsync(nodes, destination, warehouseId, skipDuplicates);
         }
 
         private Task DragHistoryAsync(FrameworkElement source, bool fromTree)

@@ -79,15 +79,16 @@ namespace Backup.Desktop
                     }
                 }
 
-                selection.CopyTo = destination =>
+                selection.CopyTo = (destination, skipDuplicates) =>
                 {
                     var errors = new List<string>();
+                    int skipped = 0;
                     foreach (var child in children)
                     {
                         selection.Cancellation.Token.ThrowIfCancellationRequested();
                         try
                         {
-                            CopyRestored(child, destination);
+                            skipped += CopyRestored(child, destination, skipDuplicates);
                         }
                         catch (IOException error)
                         {
@@ -101,6 +102,7 @@ namespace Backup.Desktop
 
                     if (errors.Count > 0)
                         throw new IOException(string.Join("\n", errors));
+                    return skipped;
                 };
                 return selection;
             }
