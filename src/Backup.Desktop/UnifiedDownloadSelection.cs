@@ -22,7 +22,10 @@ namespace Backup.Desktop
             var workspace = WorkspaceMigration.Load(Catalog);
             var raw = new List<Tuple<BackupHistoryNode, string>>();
             var directories = new List<string>();
-            var requests = new List<RestoreRequest>();
+            var logical = nodes.Where(node => node.Entry == null || node.ArchiveContainer).ToList();
+            var requests = logical.Count == 0 ? new List<RestoreRequest>() :
+                BackupHistoryTree.Requests(logical, warehouseId, workspace, ReadArchiveRootLabels,
+                    warehouseId != null && warehouseId.StartsWith("destination:", StringComparison.Ordinal) ? (Func<long, string, bool>)Catalog.HasCompleteArchiveAt : null);
             Action<BackupHistoryNode, string, int> visit = null;
             visit = (node, prefix, depth) =>
             {
@@ -39,15 +42,9 @@ namespace Backup.Desktop
                 else
                     raw.Add(Tuple.Create(node, relative));
             };
-            foreach (var node in nodes)
-            {
-                if (node.Entry == null || node.ArchiveContainer)
-                    requests.AddRange(BackupHistoryTree.Requests(new[] { node }, warehouseId, workspace, ReadArchiveRootLabels));
-                else
-                    visit(node, "", 0);
-            }
+            foreach (var node in nodes.Where(item => item.Entry != null && !item.ArchiveContainer))
+                visit(node, "", 0);
 
-            requests = requests.GroupBy(item => item.RelativePath, StringComparer.OrdinalIgnoreCase).Select(group => group.OrderByDescending(item => item.File.ArchiveId).First()).ToList();
             var children = new List<RestoredSelection>();
             try
             {

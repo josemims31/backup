@@ -386,17 +386,12 @@ namespace Backup.Desktop
                 return new List<ChoiceRow>();
             var files = nodes.SelectMany(node => node.IsDirectory ? Descendants(node).Where(file => file.File != null && file.File.FileState == "current") : new[] { node }).Where(node => node.File != null)
                 .ToList();
-            var candidates = files.SelectMany(node => node.Replicas.Count > 0 ? (IEnumerable<FileHistoryRow>)node.Replicas : new[] { node.File }).Select(row => row.DestinationId).Distinct();
+            var candidates = files.SelectMany(DownloadCopies).Select(row => row.DestinationId).Distinct();
+            var completeCopy = CompleteDownloadCopy(complete);
             var result = new List<ChoiceRow>();
             foreach (string id in candidates)
             {
-                if (files.Count == 0 ||
-                    !files.All(node => (node.Replicas.Count > 0 ? node.Replicas : new List<FileHistoryRow> { node.File }).Any(row => row.DestinationId == id &&
-                    row.PlacementStatus == "complete")) ||
-                    complete != null &&
-                    files.Select(node => node.ArchiveId)
-                    .Distinct()
-                    .Any(archive => !complete(archive, id)))
+                if (!files.All(node => DownloadCopies(node).Any(row => row.DestinationId == id && completeCopy(row))))
                     continue;
                 var destination = topology.Destinations.FirstOrDefault(value => value.Id == id);
                 if (destination == null)
@@ -406,6 +401,31 @@ namespace Backup.Desktop
             }
 
             return result.OrderBy(choice => choice.Name, StringComparer.CurrentCultureIgnoreCase).ToList();
+        }
+
+        private static IEnumerable<FileHistoryRow> DownloadCopies(BackupHistoryNode node)
+        {
+            return node.Replicas.Count > 0 ? (IEnumerable<FileHistoryRow>)node.Replicas : new[] { node.File };
+        }
+
+        private static Func<FileHistoryRow, bool> CompleteDownloadCopy(Func<long, string, bool> complete)
+        {
+            if (complete == null)
+                return row => row.PlacementStatus == "complete";
+            var checkedCopies = new Dictionary<Tuple<long, string>, bool>();
+            return row =>
+            {
+                if (row.PlacementStatus != "complete")
+                    return false;
+                var key = Tuple.Create(row.ArchiveId, row.DestinationId);
+                bool available;
+                if (!checkedCopies.TryGetValue(key, out available))
+                {
+                    available = complete(row.ArchiveId, row.DestinationId);
+                    checkedCopies.Add(key, available);
+                }
+                return available;
+            };
         }
 
         private static IEnumerable<BackupHistoryNode> Descendants(BackupHistoryNode node)
@@ -418,20 +438,17 @@ namespace Backup.Desktop
             }
         }
 
-        private static RestoreRequest Request(BackupHistoryNode node, string relative, string warehouseId)
+        private static RestoreRequest Request(BackupHistoryNode node, string relative, string warehouseId, Func<FileHistoryRow, bool> completeCopy)
         {
             var row = node.File;
             bool physical = warehouseId != null && warehouseId.StartsWith("destination:", StringComparison.Ordinal);
             string id = physical ? warehouseId.Substring(12) : warehouseId;
             if (warehouseId != null)
             {
-                var replicas = node.Replicas.Count > 0 ? (IEnumerable<FileHistoryRow>)node.Replicas : new[]
-                {
-                    node.File
-                };
-                row = replicas.FirstOrDefault(r => physical ? r.DestinationId == id : r.GroupId == id);
+                var replicas = DownloadCopies(node);
+                row = replicas.FirstOrDefault(r => physical ? r.DestinationId == id && (completeCopy == null || completeCopy(r)) : r.GroupId == id);
                 if (row == null)
-                    throw new System.IO.IOException("所选仓库不包含全部选定文件：" + node.Name);
+                    throw new System.IO.IOException("所选仓库未登记此文件的可用副本：" + node.Name);
             }
 
             return new RestoreRequest
@@ -445,16 +462,23 @@ namespace Backup.Desktop
 
         public static IList<RestoreRequest> Requests(IEnumerable<BackupHistoryNode> selected, string warehouseId = null, WorkspaceDefinition workspace = null, Func<string, IDictionary<string, string>> rootLabels = null)
         {
+            return Requests(selected, warehouseId, workspace, rootLabels, null);
+        }
+
+        internal static IList<RestoreRequest> Requests(IEnumerable<BackupHistoryNode> selected, string warehouseId, WorkspaceDefinition workspace,
+            Func<string, IDictionary<string, string>> rootLabels, Func<long, string, bool> complete)
+        {
             var nodes = selected.ToList();
             if (nodes.Any(node => node.IsArchiveBrowseBlocked))
                 throw new System.IO.IOException(nodes.First(node => node.IsArchiveBrowseBlocked).ArchiveBrowseNotice);
             var layout = new RestorePathLayout(workspace, rootLabels);
             var result = new List<RestoreRequest>();
+            var completeCopy = complete == null ? null : CompleteDownloadCopy(complete);
             foreach (var node in nodes)
             {
                 if (!node.IsDirectory)
                 {
-                    result.Add(Request(node, node.Name, warehouseId));
+                    result.Add(Request(node, node.Name, warehouseId, completeCopy));
                     continue;
                 }
 
@@ -462,7 +486,7 @@ namespace Backup.Desktop
                 foreach (var file in Descendants(node).Where(c => !c.IsDirectory && c.File.FileState == "current" && c.File.ArchiveStatus != "failed" && c.File.ArchiveStatus != "writing").GroupBy(c => c.File.Path, StringComparer.OrdinalIgnoreCase)
                     .Select(g => g.OrderByDescending(c => c.ArchiveId)
                     .First()))
-                    result.Add(Request(file, layout.FolderRelative(file.File, prefix), warehouseId));
+                    result.Add(Request(file, layout.FolderRelative(file.File, prefix), warehouseId, completeCopy));
             }
 
             return result.GroupBy(r => r.RelativePath, StringComparer.OrdinalIgnoreCase).Select(g => g.OrderByDescending(r => r.File.ArchiveId).First()).ToList();

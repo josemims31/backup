@@ -47,6 +47,13 @@ namespace Backup.Desktop
                         using (Backend.IndependentDownload(cancellation.Token))
                             await action();
                     }
+                    catch (OperationCanceledException)
+                    {
+                        if (!cancellation.IsCancellationRequested)
+                            throw;
+                        if (!disposed && !closeAfterWork)
+                            Log("下载已取消。", OperationState.Cancelled);
+                    }
                     finally
                     {
                         independentDownloadActive = false;

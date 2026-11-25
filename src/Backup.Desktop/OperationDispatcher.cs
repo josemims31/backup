@@ -102,6 +102,17 @@ namespace Backup.Desktop
             }
         }
 
+        internal CancellationTokenSource ActiveDownloadCancellation
+        {
+            get
+            {
+                lock (gate)
+                    return foreground != null && foreground.Kind == OperationKind.Download
+                        ? foreground.Cancellation
+                        : readers.Where(reader => reader.Kind == OperationKind.Download).Select(reader => reader.Cancellation).FirstOrDefault();
+            }
+        }
+
         private bool HasDownloads
         {
             get
@@ -454,6 +465,7 @@ namespace Backup.Desktop
             UpdateSelectionControls();
             UpdateScheduleRunButton();
             UpdateRemoteTaskActions();
+            RefreshCancelDownloadButton();
         }
     }
 }

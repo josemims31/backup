@@ -27,6 +27,26 @@ namespace Backup.Desktop
             {
                 RenderDownloadStatus();
             };
+            Button("CancelDownload").Click += delegate
+            {
+                var cancellation = operations.ActiveDownloadCancellation;
+                if (cancellation == null || cancellation.IsCancellationRequested)
+                    return;
+                var button = Button("CancelDownload");
+                button.IsEnabled = false;
+                button.Content = "取消中…";
+                cancellation.Cancel();
+            };
+        }
+
+        private void RefreshCancelDownloadButton()
+        {
+            var cancellation = operations.ActiveDownloadCancellation;
+            bool visible = cancellation != null && !disposed && !closeAfterWork;
+            var button = Button("CancelDownload");
+            button.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+            button.IsEnabled = visible && !cancellation.IsCancellationRequested;
+            button.Content = visible && cancellation.IsCancellationRequested ? "取消中…" : "取消下载";
         }
 
         private void RefreshUploadStatus()
