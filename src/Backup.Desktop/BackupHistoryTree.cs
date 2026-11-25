@@ -381,12 +381,19 @@ namespace Backup.Desktop
 
         public static IList<ChoiceRow> DownloadWarehouses(IEnumerable<BackupHistoryNode> selected, StorageTopology topology, Func<long, string, bool> complete = null)
         {
+            return DownloadWarehouses(selected, topology, complete, null);
+        }
+
+        internal static IList<ChoiceRow> DownloadWarehouses(IEnumerable<BackupHistoryNode> selected, StorageTopology topology,
+            Func<long, string, bool> complete, Func<long, string, bool> completeGroup)
+        {
             var nodes = selected.ToList();
             if (nodes.Any(node => node.IsArchiveBrowseBlocked))
                 return new List<ChoiceRow>();
             var files = nodes.SelectMany(node => node.IsDirectory ? Descendants(node).Where(file => file.File != null && file.File.FileState == "current") : new[] { node }).Where(node => node.File != null)
                 .ToList();
-            var candidates = files.SelectMany(DownloadCopies).Select(row => row.DestinationId).Distinct();
+            var copies = files.SelectMany(DownloadCopies);
+            var candidates = copies.Select(row => row.DestinationId).Distinct();
             var completeCopy = CompleteDownloadCopy(complete);
             var result = new List<ChoiceRow>();
             foreach (string id in candidates)
@@ -400,6 +407,16 @@ namespace Backup.Desktop
                 result.Add(new ChoiceRow { Id = "destination:" + id, Name = leaf == null ? id : leaf.Name, ToolTip = destination.Location });
             }
 
+            if (completeGroup != null)
+            {
+                var registered = new HashSet<string>(copies.Select(row => row.GroupId), StringComparer.Ordinal);
+                var completeGroupCopy = CompleteDownloadCopy(completeGroup, true);
+                foreach (var group in topology.Groups.Where(group => registered.Contains(group.Id) &&
+                    !group.Id.StartsWith("single:", StringComparison.Ordinal) && !group.Id.StartsWith("transfer:", StringComparison.Ordinal)))
+                    if (files.All(node => DownloadCopies(node).Any(row => row.GroupId == group.Id && completeGroupCopy(row))))
+                        result.Add(new ChoiceRow { Id = group.Id, Name = group.Name, ToolTip = Display.TargetHint(topology, group) });
+            }
+
             return result.OrderBy(choice => choice.Name, StringComparer.CurrentCultureIgnoreCase).ToList();
         }
 
@@ -408,20 +425,21 @@ namespace Backup.Desktop
             return node.Replicas.Count > 0 ? (IEnumerable<FileHistoryRow>)node.Replicas : new[] { node.File };
         }
 
-        private static Func<FileHistoryRow, bool> CompleteDownloadCopy(Func<long, string, bool> complete)
+        private static Func<FileHistoryRow, bool> CompleteDownloadCopy(Func<long, string, bool> complete, bool group = false)
         {
             if (complete == null)
                 return row => row.PlacementStatus == "complete";
             var checkedCopies = new Dictionary<Tuple<long, string>, bool>();
             return row =>
             {
-                if (row.PlacementStatus != "complete")
+                if (!group && row.PlacementStatus != "complete")
                     return false;
-                var key = Tuple.Create(row.ArchiveId, row.DestinationId);
+                string source = group ? row.GroupId : row.DestinationId;
+                var key = Tuple.Create(row.ArchiveId, source);
                 bool available;
                 if (!checkedCopies.TryGetValue(key, out available))
                 {
-                    available = complete(row.ArchiveId, row.DestinationId);
+                    available = complete(row.ArchiveId, source);
                     checkedCopies.Add(key, available);
                 }
                 return available;
@@ -446,7 +464,7 @@ namespace Backup.Desktop
             if (warehouseId != null)
             {
                 var replicas = DownloadCopies(node);
-                row = replicas.FirstOrDefault(r => physical ? r.DestinationId == id && (completeCopy == null || completeCopy(r)) : r.GroupId == id);
+                row = replicas.FirstOrDefault(r => (physical ? r.DestinationId : r.GroupId) == id && (completeCopy == null || completeCopy(r)));
                 if (row == null)
                     throw new System.IO.IOException("所选仓库未登记此文件的可用副本：" + node.Name);
             }
@@ -473,7 +491,7 @@ namespace Backup.Desktop
                 throw new System.IO.IOException(nodes.First(node => node.IsArchiveBrowseBlocked).ArchiveBrowseNotice);
             var layout = new RestorePathLayout(workspace, rootLabels);
             var result = new List<RestoreRequest>();
-            var completeCopy = complete == null ? null : CompleteDownloadCopy(complete);
+            var completeCopy = complete == null ? null : CompleteDownloadCopy(complete, warehouseId != null && !warehouseId.StartsWith("destination:", StringComparison.Ordinal));
             foreach (var node in nodes)
             {
                 if (!node.IsDirectory)

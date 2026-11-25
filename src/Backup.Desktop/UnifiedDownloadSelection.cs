@@ -23,9 +23,12 @@ namespace Backup.Desktop
             var raw = new List<Tuple<BackupHistoryNode, string>>();
             var directories = new List<string>();
             var logical = nodes.Where(node => node.Entry == null || node.ArchiveContainer).ToList();
+            Func<long, string, bool> complete = null;
+            if (warehouseId != null)
+                complete = warehouseId.StartsWith("destination:", StringComparison.Ordinal)
+                    ? (Func<long, string, bool>)Catalog.HasCompleteArchiveAt : Catalog.HasCompleteArchiveInGroup;
             var requests = logical.Count == 0 ? new List<RestoreRequest>() :
-                BackupHistoryTree.Requests(logical, warehouseId, workspace, ReadArchiveRootLabels,
-                    warehouseId != null && warehouseId.StartsWith("destination:", StringComparison.Ordinal) ? (Func<long, string, bool>)Catalog.HasCompleteArchiveAt : null);
+                BackupHistoryTree.Requests(logical, warehouseId, workspace, ReadArchiveRootLabels, complete);
             Action<BackupHistoryNode, string, int> visit = null;
             visit = (node, prefix, depth) =>
             {

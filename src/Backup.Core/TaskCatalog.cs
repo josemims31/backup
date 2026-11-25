@@ -208,15 +208,21 @@ namespace Backup.Core
 
         public bool HasCompleteArchiveAt(long archiveId, string destination)
         {
+            return HasCompleteArchiveFrom(archiveId, destination, "destination_id");
+        }
+
+        public bool HasCompleteArchiveInGroup(long archiveId, string groupId)
+        {
+            return HasCompleteArchiveFrom(archiveId, groupId, "group_id");
+        }
+
+        private bool HasCompleteArchiveFrom(long archiveId, string sourceId, string column)
+        {
             lock (gate)
-                return Scalar("SELECT count(*) FROM archives WHERE id=? AND status IN ('complete','repair-required','redundancy-shortfall','snapshot-history')", archiveId) > 0 &&
-                    Scalar("SELECT count(*) FROM objects WHERE archive_id=?", archiveId) > 0 &&
-                    Scalar(
-                    ("SELECT count(*) FROM objects o WHERE o.archive_id=? AND NOT EXISTS(SELECT 1 FROM object_copies c WHERE c.name=o.name " +
-                    "AND c.destination_id=? AND c.state='present')"),
-                    archiveId,
-                    destination
-                ) == 0;
+                return Scalar("SELECT count(*) FROM archives a WHERE a.id=? AND a.status IN ('complete','repair-required','redundancy-shortfall','snapshot-history') " +
+                    "AND EXISTS(SELECT 1 FROM objects o WHERE o.archive_id=a.id) " +
+                    "AND NOT EXISTS(SELECT 1 FROM objects o WHERE o.archive_id=a.id AND NOT EXISTS(SELECT 1 FROM object_copies c WHERE c.name=o.name " +
+                    "AND c." + column + "=? AND c.state='present'))", archiveId, sourceId) != 0;
         }
 
         public IList<FileHistoryRow> GetArchiveHistory(long archiveId)

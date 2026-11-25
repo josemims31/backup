@@ -304,8 +304,10 @@ namespace Backup.Desktop
                         var groups = archive.Where(r => !string.IsNullOrEmpty(r.RequiredGroupId)).Select(r => r.RequiredGroupId).Distinct().ToList();
                         if (groups.Count > 1)
                             throw new IOException("同一压缩包选择了不同的下载仓库，请分别下载。");
+                        string group = groups.FirstOrDefault();
                         var objects = Catalog.GetObjects(archive.Key);
-                        var copies = Catalog.GetCopies(archive.Key).Where(copy => allowedDestinations == null || allowedDestinations.Contains(copy.DestinationId)).ToList();
+                        var copies = Catalog.GetCopies(archive.Key).Where(copy => (group == null || copy.GroupId == group) &&
+                            (allowedDestinations == null || allowedDestinations.Contains(copy.DestinationId))).ToList();
                         var inspectedStates = Catalog.IntegrityCopyStates(archive.Key);
                         if (objects.Count == 0)
                             throw new IOException("没有已备份的分卷。");
@@ -321,7 +323,7 @@ namespace Backup.Desktop
                             report,
                             warning,
                             required.FirstOrDefault(),
-                            groups.FirstOrDefault(),
+                            group,
                             inspectedStates
                         );
                         Action<ObjectRecord, byte[], CancellationToken> fill = (item, buffer, token) => ReadRestoreVolumeInto(
@@ -335,7 +337,7 @@ namespace Backup.Desktop
                             report,
                             warning,
                             required.FirstOrDefault(),
-                            groups.FirstOrDefault(),
+                            group,
                             inspectedStates,
                             buffer
                         );

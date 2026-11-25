@@ -272,7 +272,8 @@ namespace Backup.Desktop
             };
             menu.Items.Add(download);
             if (available && nodes.All(node => node.Entry == null || node.ArchiveContainer))
-                foreach (var choice in BackupHistoryTree.DownloadWarehouses(nodes, Backend.Catalog.LoadTopology(), Backend.Catalog.HasCompleteArchiveAt))
+                foreach (var choice in BackupHistoryTree.DownloadWarehouses(nodes, Backend.Catalog.LoadTopology(),
+                    Backend.Catalog.HasCompleteArchiveAt, Backend.Catalog.HasCompleteArchiveInGroup))
                 {
                     var item = new MenuItem
                     {
